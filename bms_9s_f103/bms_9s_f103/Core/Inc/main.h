@@ -57,6 +57,26 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define LED1_Pin GPIO_PIN_13
+#define LED1_GPIO_Port GPIOC
+#define MCU_KZ_BQ_POWER_Pin GPIO_PIN_0
+#define MCU_KZ_BQ_POWER_GPIO_Port GPIOA
+#define MCU_D_POWER_Pin GPIO_PIN_1
+#define MCU_D_POWER_GPIO_Port GPIOA
+#define LED2_Pin GPIO_PIN_0
+#define LED2_GPIO_Port GPIOB
+#define STA_WAKE_Pin GPIO_PIN_1
+#define STA_WAKE_GPIO_Port GPIOB
+#define MCU_BQ1_ART_Pin GPIO_PIN_2
+#define MCU_BQ1_ART_GPIO_Port GPIOB
+#define MCU_IN_STA_Pin GPIO_PIN_12
+#define MCU_IN_STA_GPIO_Port GPIOB
+#define MCU_WAKE_BQ_Pin GPIO_PIN_8
+#define MCU_WAKE_BQ_GPIO_Port GPIOA
+#define QT_TX_Pin GPIO_PIN_9
+#define QT_TX_GPIO_Port GPIOA
+#define QT_RX_Pin GPIO_PIN_10
+#define QT_RX_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
