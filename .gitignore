@@ -1,1 +1,5 @@
-./datasheet/BMSvideo
+*.wmv
+*.zip
+*.mp4
+*.avi
+/bms_9s_f103/bms_9s_f103/build
