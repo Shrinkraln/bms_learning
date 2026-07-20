@@ -223,6 +223,15 @@ static void soc_task(void *arg)
 
         uint16_t  cell_min  = bms->bq_data.cells.min_mv;
         int32_t   current   = bms->bq_data.current.current_ma;
+
+        /* 取最高温度传感器值 (最热芯 = 最保守的容量估算) */
+        int16_t temp_max = bms->bq_data.temps.ts_mdeg_c[0];
+        for (uint8_t i = 1U; i < BQ76940_TS_COUNT; i++) {
+            if (bms->bq_data.temps.ts_mdeg_c[i] > temp_max) {
+                temp_max = bms->bq_data.temps.ts_mdeg_c[i];
+            }
+        }
+
         bms_shared_data_unlock();
 
         uint32_t now   = bsp_tick_get();
@@ -230,7 +239,7 @@ static void soc_task(void *arg)
         last_ms = now;
 
         /* 更新 SOC/OCV */
-        soc_ocv_update(cell_min, current, dt_ms);
+        soc_ocv_update(cell_min, current, temp_max, dt_ms);
 
         /* 写回共享数据 */
         bms_shared_update_soc(soc_ocv_get_soc(),
