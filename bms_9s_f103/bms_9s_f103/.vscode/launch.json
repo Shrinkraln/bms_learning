@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [{
+        "name": "Cortex Debug (OpenOCD)",
+        "cwd": "${workspaceFolder}",
+        "executable": "${workspaceFolder}/build/BMS_9S_F103.elf",
+        "request": "launch",
+        "type": "cortex-debug",
+        "servertype": "openocd",
+        "configFiles": ["interface/stlink.cfg","target/stm32f1x.cfg"],
+        "runToEntryPoint": "main",
+        "preLaunchTask": "CMake: Build"
+    }]
+}
