@@ -107,6 +107,9 @@ set(App_Src
     App/Src/protection.c
     App/Src/data_report.c
     App/Src/bms_app.c
+    App/Src/bms_shared.c
+    App/Src/soc_ocv.c
+    App/Src/can_cmd.c
 )
 
 add_library(App OBJECT)

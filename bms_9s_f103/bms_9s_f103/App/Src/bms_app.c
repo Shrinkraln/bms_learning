@@ -1,16 +1,12 @@
 /**
  * @file    bms_app.c
- * @brief   BMS 主应用实现
- * @note    系统初始化顺序:
- *          1. HAL 初始化 (HAL_Init → SystemClock_Config)
- *          2. 外设初始化 (MX_GPIO, MX_CAN, MX_I2C, MX_USART, ...)
- *          3. bms_app_init() — BSP + App 模块初始化
- *          4. FreeRTOS 初始化 (osKernelInitialize → MX_FREERTOS_Init)
- *          5. 启动调度器 (osKernelStart)
- *          6. bms_task_entry() 开始运行
+ * @brief   BMS 主应用实现 — 初始化 + 所有任务函数
  */
 
 #include "bms_app.h"
+#include "bms_shared.h"
+#include "soc_ocv.h"
+#include "can_cmd.h"
 #include "systick.h"
 #include "led.h"
 #include "io_ctrl.h"
@@ -24,55 +20,72 @@
 #include "data_report.h"
 
 /* ============================================================
- * 配置
+ * 任务句柄（供调试/监控使用）
  * ============================================================ */
 
-/** @brief BMS 主循环周期 (ms) */
-#define BMS_LOOP_PERIOD_MS      10U
-
-/** @brief 看门狗超时 (ms) — 需大于主循环周期 */
-#define BMS_WDG_TIMEOUT_MS      500U
-
-/** @brief 数据上报周期 (循环次数 = 上报周期/主循环周期) */
-#define REPORT_FAST_CYCLES      (REPORT_PERIOD_FAST / BMS_LOOP_PERIOD_MS)
-#define REPORT_SLOW_CYCLES      (REPORT_PERIOD_SLOW / BMS_LOOP_PERIOD_MS)
-
-/** @brief LED 闪烁周期 (ms) */
-#define LED_BLINK_NORMAL_MS     500U
-#define LED_BLINK_FAULT_MS      100U
-#define LED_BLINK_FAST_MS       50U
+static osThreadId_t task_acq_handle    = NULL;
+static osThreadId_t task_prot_handle   = NULL;
+static osThreadId_t task_soc_handle    = NULL;
+static osThreadId_t task_can_tx_handle = NULL;
+static osThreadId_t task_can_rx_handle = NULL;
+static osThreadId_t task_wdg_handle    = NULL;
 
 /* ============================================================
- * 模块内变量
+ * 任务属性
  * ============================================================ */
 
-/** @brief BMS 全局上下文 */
-static bms_ctx_t bms_ctx;
+static const osThreadAttr_t acq_task_attr = {
+    .name       = "acq",
+    .stack_size = 512U * 4U,
+    .priority   = osPriorityNormal,
+};
+
+static const osThreadAttr_t prot_task_attr = {
+    .name       = "prot",
+    .stack_size = 256U * 4U,
+    .priority   = osPriorityAboveNormal,
+};
+
+static const osThreadAttr_t soc_task_attr = {
+    .name       = "soc",
+    .stack_size = 512U * 4U,
+    .priority   = osPriorityNormal,
+};
+
+static const osThreadAttr_t can_tx_task_attr = {
+    .name       = "canTx",
+    .stack_size = 256U * 4U,
+    .priority   = osPriorityNormal,
+};
+
+static const osThreadAttr_t can_rx_task_attr = {
+    .name       = "canRx",
+    .stack_size = 512U * 4U,
+    .priority   = osPriorityHigh,
+};
+
+static const osThreadAttr_t wdg_task_attr = {
+    .name       = "wdg",
+    .stack_size = 128U * 4U,
+    .priority   = osPriorityLow,
+};
 
 /* ============================================================
- * 状态字符串
+ * 任务函数前向声明
  * ============================================================ */
 
-const char *bms_state_str(bms_state_t state)
-{
-    switch (state) {
-        case BMS_STATE_INIT:       return "INIT";
-        case BMS_STATE_IDLE:       return "IDLE";
-        case BMS_STATE_CHARGE:     return "CHARGE";
-        case BMS_STATE_DISCHARGE:  return "DISCHARGE";
-        case BMS_STATE_FAULT:      return "FAULT";
-        case BMS_STATE_SHUTDOWN:   return "SHUTDOWN";
-        default:                   return "UNKNOWN";
-    }
-}
+static void acquisition_task(void *arg);
+static void protection_task(void *arg);
+static void soc_task(void *arg);
+static void watchdog_task(void *arg);
 
 /* ============================================================
- * 初始化
+ * bms_app_init — 入口
  * ============================================================ */
 
 void bms_app_init(void)
 {
-    /* ---- BSP 层初始化 ---- */
+    /* ---- 1. BSP 层初始化 ---- */
     bsp_tick_init();
     led_init();
     io_ctrl_init();
@@ -81,148 +94,183 @@ void bms_app_init(void)
     can_drv_init();
     timer_init();
 
-    /* ---- 启动看门狗 ---- */
-    wdg_init(BMS_WDG_TIMEOUT_MS);
+    /* 启动看门狗 (超时 1000ms) */
+    wdg_init(1000U);
 
-    /* ---- BQ76940 初始化（使用默认保护阈值） ---- */
+    /* ---- 2. 共享数据中心 ---- */
+    bms_shared_init();
+
+    /* ---- 3. SOC/OCV 模块 ---- */
+    soc_ocv_init(0);  /* 使用默认 20000mAh */
+
+    /* ---- 4. BQ76940 初始化 ---- */
     bq76940_status_t ret = bq76940_init(NULL);
     if (ret != BQ76940_OK) {
-        /* BQ76940 初始化失败 — 通过 LED 指示错误 */
+        /* BQ76940 通信失败 — 红色 LED 常亮 */
         led_on(LED_ID_2);
-        /* 继续运行，后续循环会重试通信 */
     }
 
-    /* ---- App 层初始化 ---- */
+    /* ---- 5. 保护模块 ---- */
     protection_init();
+
+    /* ---- 6. 数据上报模块 ---- */
     data_report_init();
 
-    /* ---- 系统状态 ---- */
-    bms_ctx.state      = BMS_STATE_INIT;
-    bms_ctx.loop_count = 0U;
-    bms_ctx.uptime_ms  = 0U;
+    /* ---- 7. CAN 指令模块（创建消息队列 + 注册回调） ---- */
+    can_cmd_init();
 
-    /* 指示初始化完成 */
+    /* ---- 8. 创建 FreeRTOS 任务 ---- */
+    task_can_rx_handle = osThreadNew(can_cmd_task_entry, NULL,
+                                      &can_rx_task_attr);
+    task_prot_handle   = osThreadNew(protection_task, NULL,
+                                      &prot_task_attr);
+    task_acq_handle    = osThreadNew(acquisition_task, NULL,
+                                      &acq_task_attr);
+    task_can_tx_handle = osThreadNew(can_tx_task_entry, NULL,
+                                      &can_tx_task_attr);
+    task_soc_handle    = osThreadNew(soc_task, NULL,
+                                      &soc_task_attr);
+    task_wdg_handle    = osThreadNew(watchdog_task, NULL,
+                                      &wdg_task_attr);
+
+    /* ---- 9. 绿色 LED 指示初始化完成 ---- */
     led_on(LED_ID_1);
 }
 
 /* ============================================================
- * 主任务
+ * 采集任务 (100ms)
  * ============================================================ */
 
-void bms_task_entry(void *argument)
+static void acquisition_task(void *arg)
 {
-    (void)argument;
+    (void)arg;
 
-    /* 过渡到 IDLE 状态 */
-    bms_ctx.state = BMS_STATE_IDLE;
+    /* 等待 BQ76940 初始化稳定 */
+    osDelay(200U);
 
-    uint32_t last_led_toggle = bsp_tick_get();
-    uint8_t  led_val = 1U;
+    bq76940_data_t data;
 
     for (;;) {
-        /* ---- 喂狗 ---- */
-        wdg_kick();
+        /* 读取 BQ76940 全部数据 */
+        bq76940_status_t ret = bq76940_read_all(&data);
 
-        /* ---- 采集数据 ---- */
-        bq76940_status_t ret = bq76940_read_all(&bms_ctx.data);
-
-        if (ret != BQ76940_OK) {
-            /* 通信失败 — 使用上次数据，增加失败计数 */
-            bms_ctx.data.cells.valid = 0U;
-            bms_ctx.data.temps.valid = 0U;
+        if (ret == BQ76940_OK) {
+            /* 更新共享数据中心 */
+            bms_shared_update_bq_data(&data);
         }
+        /* 通信失败时不更新数据，保持旧值 */
 
-        /* ---- 保护检查 ---- */
-        prot_level_t prot_level = protection_check(&bms_ctx.data);
-
-        /* 同步保护上下文 */
-        const protection_ctx_t *prot = protection_get_ctx();
-        if (prot != NULL) {
-            bms_ctx.prot = *prot;
-        }
-
-        /* ---- 状态机 ---- */
-        switch (bms_ctx.state) {
-            case BMS_STATE_IDLE:
-            case BMS_STATE_CHARGE:
-            case BMS_STATE_DISCHARGE:
-                /* 判断充放电状态 */
-                if (bms_ctx.data.current.current_ma > 500) {
-                    bms_ctx.state = BMS_STATE_CHARGE;
-                } else if (bms_ctx.data.current.current_ma < -500) {
-                    bms_ctx.state = BMS_STATE_DISCHARGE;
-                } else {
-                    bms_ctx.state = BMS_STATE_IDLE;
-                }
-
-                /* 进入故障 */
-                if (prot_level >= PROT_LVL_FAULT) {
-                    bms_ctx.state = BMS_STATE_FAULT;
-                }
-                break;
-
-            case BMS_STATE_FAULT:
-                /* 故障锁存：需手动或外部命令清除 */
-                if (prot_level == PROT_LVL_NONE) {
-                    /* 故障已清除，但需要显式复位锁存 */
-                    /* 这里保持 FAULT 直到外部清除 */
-                }
-                break;
-
-            case BMS_STATE_SHUTDOWN:
-                /* 关机 — 不再喂狗，系统将复位 */
-                break;
-
-            default:
-                bms_ctx.state = BMS_STATE_IDLE;
-                break;
-        }
-
-        /* ---- 数据上报 ---- */
-        uint16_t cycle = (uint16_t)(bms_ctx.loop_count % REPORT_SLOW_CYCLES);
-
-        if (cycle == 0U) {
-            /* 慢周期：全量上报 */
-            data_report_all(&bms_ctx.data, &bms_ctx.prot);
-        } else if ((cycle % (REPORT_FAST_CYCLES)) == 0U) {
-            /* 快周期：CAN 上报 */
-            data_report_can(&bms_ctx.data, &bms_ctx.prot);
-        }
-
-        /* ---- LED 指示 ---- */
-        uint32_t now = bsp_tick_get();
-        uint32_t blink_period;
-
-        switch (prot_level) {
-            case PROT_LVL_FAULT:  blink_period = LED_BLINK_FAST_MS;  break;
-            case PROT_LVL_ALERT:  blink_period = LED_BLINK_FAULT_MS;  break;
-            default:              blink_period = LED_BLINK_NORMAL_MS; break;
-        }
-
-        if (bsp_tick_elapsed(last_led_toggle) >= blink_period) {
-            last_led_toggle = now;
-            led_val = (uint8_t)(led_val ^ 1U);
-            if (led_val) {
-                led_on(LED_ID_1);
-            } else {
-                led_off(LED_ID_1);
-            }
-        }
-
-        /* ---- 更新计数 ---- */
-        bms_ctx.loop_count++;
-        bms_ctx.uptime_ms += BMS_LOOP_PERIOD_MS;
-
-        /* ---- 延时 ---- */
-        osDelay(BMS_LOOP_PERIOD_MS);
+        osDelay(ACQ_TASK_PERIOD_MS);
     }
 }
 
 /* ============================================================
- * 上下文查询
+ * 保护任务 (10ms — 高频检查)
  * ============================================================ */
 
-const bms_ctx_t *bms_get_ctx(void)
+static void protection_task(void *arg)
 {
-    return &bms_ctx;
+    (void)arg;
+    osDelay(100U);  /* 等待首次采集完成 */
+
+    uint8_t led_fault = 0U;
+
+    for (;;) {
+        /* 从共享数据获取最新采集 */
+        bms_shared_t *bms = bms_shared_data_lock(osWaitForever);
+        if (bms == NULL) { osDelay(PROT_TASK_PERIOD_MS); continue; }
+
+        bq76940_data_t data = bms->bq_data;  /* 本地拷贝 */
+        bms_shared_data_unlock();
+
+        /* 执行保护检查 */
+        prot_level_t level = protection_check(&data);
+
+        /* 更新保护状态 */
+        const protection_ctx_t *ctx = protection_get_ctx();
+        bms_shared_update_protection(ctx, level);
+
+        /* LED 指示: 故障时红灯闪烁 */
+        if (level >= PROT_LVL_ALERT) {
+            led_fault = (uint8_t)(led_fault ^ 1U);
+            if (led_fault) {
+                led_on(LED_ID_2);
+            } else {
+                led_off(LED_ID_2);
+            }
+        } else if (level == PROT_LVL_NONE) {
+            led_off(LED_ID_2);
+        }
+
+        osDelay(PROT_TASK_PERIOD_MS);
+    }
+}
+
+/* ============================================================
+ * SOC / OCV 任务 (1000ms)
+ * ============================================================ */
+
+static void soc_task(void *arg)
+{
+    (void)arg;
+    osDelay(500U);  /* 等待采集稳定 */
+
+    uint32_t last_ms = bsp_tick_get();
+
+    for (;;) {
+        bms_shared_t *bms = bms_shared_data_lock(osWaitForever);
+        if (bms == NULL) { osDelay(SOC_TASK_PERIOD_MS); continue; }
+
+        uint16_t  cell_min  = bms->bq_data.cells.min_mv;
+        int32_t   current   = bms->bq_data.current.current_ma;
+        bms_shared_data_unlock();
+
+        uint32_t now   = bsp_tick_get();
+        uint32_t dt_ms = now - last_ms;
+        last_ms = now;
+
+        /* 更新 SOC/OCV */
+        soc_ocv_update(cell_min, current, dt_ms);
+
+        /* 写回共享数据 */
+        bms_shared_update_soc(soc_ocv_get_soc(),
+                              soc_ocv_get_ocv(),
+                              soc_ocv_get_remaining_mah());
+
+        osDelay(SOC_TASK_PERIOD_MS);
+    }
+}
+
+/* ============================================================
+ * 看门狗 + LED 心跳任务 (500ms)
+ * ============================================================ */
+
+static void watchdog_task(void *arg)
+{
+    (void)arg;
+
+    uint8_t heartbeat = 0U;
+
+    for (;;) {
+        /* 喂狗 */
+        wdg_kick();
+
+        /* LED 心跳闪烁（正常: 慢闪, 故障: 保护任务控制红灯） */
+        heartbeat = (uint8_t)(heartbeat ^ 1U);
+
+        /* 仅在无故障时绿灯心跳 */
+        bms_shared_t *bms = bms_shared_data_lock(100U);
+        if (bms != NULL) {
+            if (bms->prot_level == PROT_LVL_NONE) {
+                if (heartbeat) {
+                    led_on(LED_ID_1);
+                } else {
+                    led_off(LED_ID_1);
+                }
+            }
+            bms_shared_data_unlock();
+        }
+
+        osDelay(WDG_TASK_PERIOD_MS);
+    }
 }
