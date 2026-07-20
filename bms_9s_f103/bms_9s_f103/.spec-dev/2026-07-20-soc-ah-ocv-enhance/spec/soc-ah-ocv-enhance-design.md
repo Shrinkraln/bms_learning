@@ -5,7 +5,7 @@ spec_dev:
     - App/Src/soc_ocv.c
     - App/Inc/soc_ocv.h
     - App/Src/bms_app.c
-  status: draft
+  status: active
 ---
 
 # 增强型安时积分 + OCV 查表 SOC 估算
