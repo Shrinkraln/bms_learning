@@ -123,7 +123,9 @@ freertos.c 中的 `defaultTask`（仅 `osDelay(1000)` 空循环）SHALL 被移�
 
 ### MODIFIED: FreeRTOS 堆大小
 
-系统 SHALL 使用 `configTOTAL_HEAP_SIZE = 15360`（原 3072），满足 6 个 BMS 任务 + 定时器任务 + 队列 + 互斥锁的内存需求。
+系统 SHALL 使用 `configTOTAL_HEAP_SIZE = 12288`（原 3072），满足 6 个 BMS 任务 + 定时器任务 + 队列 + 互斥锁的内存需求。
+
+STM32F103C8Tx SRAM 预算：20KB 总量 ≈ 6KB 静态数据（.data+.bss，不含堆数组）+ 12KB ucHeap + 2KB 余量。
 
 #### Scenario: 所有任务正常创建
 - GIVEN 堆大小为 15360 字节
@@ -132,12 +134,18 @@ freertos.c 中的 `defaultTask`（仅 `osDelay(1000)` 空循环）SHALL 被移�
 
 ### MODIFIED: 故障处理器捕获诊断信息
 
-系统 SHALL 在 HardFault / MemManage / BusFault / UsageFault 触发时，将 SCB 故障寄存器（CFSR、HFSR、MMFAR、BFAR）保存到备份 SRAM（0x2000F000），然后进入死循环。
+系统 SHALL 在 HardFault / MemManage / BusFault / UsageFault 触发时，将 SCB 故障寄存器（CFSR、HFSR、MMFAR、BFAR）保存到 `.noinit` 段（复位不擦除）的静态变量中，然后进入死循环。
+
+```c
+__attribute__((section(".noinit"))) static volatile uint32_t fault_cfsr, fault_hfsr,
+                                                      fault_mmfar, fault_bfar;
+__attribute__((section(".noinit"))) static volatile uint32_t fault_signature;
+```
 
 #### Scenario: HardFault 发生后可追溯
 - GIVEN 代码触发了一次 HardFault
-- WHEN 系统复位后读取备份 SRAM
-- THEN 0x2000F000 处保存了 CFSR 和 HFSR 值，0x2000F010 处有签名 0xDEADBEEF
+- WHEN 系统复位后（.noinit 段值保留），启动代码读取 fault_signature
+- THEN fault_signature == 0xDEADBEEF，fault_cfsr/hfsr/mmfar/bfar 保存了故障时刻的 SCB 寄存器值
 
 ### MODIFIED: bms_app_init 不创建任务
 
@@ -185,7 +193,7 @@ prot_result_t protection_check(const bq76940_data_t *data,
 
 ### MODIFIED: 保护恢复增加去抖
 
-系统 SHALL 要求故障恢复需连续 `PROT_FAULT_CONFIRM_CNT`（3 次）采样均正常才清除故障标志；故障进入去抖也使用同一常量 `PROT_FAULT_CONFIRM_CNT`（3 次），进入与恢复对称。
+系统 SHALL 要求故障恢复需连续 `PROT_FAULT_CONFIRM_CNT`（3 次，在 10ms 保护周期下合计 30ms）采样均正常才清除故障标志；故障进入去抖也使用同一常量——进入与恢复对称（均为 3 次 / 30ms）。
 
 #### Scenario: 瞬态恢复不误清除故障
 - GIVEN 某电芯处于过压状态
@@ -213,7 +221,7 @@ can_action_req_t can_cmd_dispatch(const can_msg_t *msg,
 - WHEN `can_cmd_task_entry` 收到该 action
 - THEN 调用 `bq76940_set_balancing(mask)`
 
-### MODIFIED: FET 控制命令实际执行
+### MODIFIED: FET 控制 action 实际执行
 
 系统 SHALL 在 `can_cmd_task_entry` 处理 `CAN_ACTION_FET_CHG_ON` 和 `CAN_ACTION_FET_DSG_ON` 时，调用 `io_ctrl_set()` 控制对应 FET 引脚。`can_cmd_dispatch()` 内部只做安全条件检查（无故障才允许开启），返回对应的 action。
 
@@ -251,7 +259,7 @@ can_action_req_t can_cmd_dispatch(const can_msg_t *msg,
 
 ### MODIFIED: BQ76940 多字节读取使用 CRC
 
-系统 SHALL 在 `bq76940_read_cells()` 中使用 `i2c_sw_read_crc()` 替代 `i2c_sw_read_buf()`，对 18 字节电芯电压数据做 CRC8 完整性校验。
+系统 SHALL 在 `bq76940_read_cells()` 中使用 `i2c_sw_read_crc()` 替代 `i2c_sw_read_buf()`，对 18 字节电芯电压数据做 CRC8 完整性校验。CRC8 多项式使用 BQ76940 datasheet（SLUSC25B）规定的 x⁸ + x² + x + 1（0x07），与 `i2c_sw_crc8()` 现有实现一致。
 
 #### Scenario: CRC 校验失败时数据无效
 - GIVEN I2C 通信受干扰导致数据损坏
@@ -450,7 +458,8 @@ uint8_t  ring_buf_get(ring_buf_t *rb, uint8_t *byte);   // 0=OK, 1=buffer empty
 | 指标 | 重构前 | 重构后 |
 |------|--------|--------|
 | FLASH | ~26.1 KB | ~25.9 KB（删 data_report 节省 ~1KB，新增 ~200 行 ≈ 0.8KB；26.1−1.0+0.8≈25.9） |
-| RAM | ~9.1 KB | ~9.9 KB（堆扩大 12KB → 更多动态可用，静态栈不变） |
+| RAM（静态） | ~9.1 KB（含 ucHeap 3KB） | ~18.4 KB（含 ucHeap 12KB；6KB 其他静态 + 12KB 堆数组 + ~0.4KB 新增 .noinit） |
+| SRAM 总量 | 20 KB | 20 KB（堆扩大后仍留 ~1.6KB 余量） |
 | 编译警告/错误 | 0 / 0 | 目标 0 / 0 |
 | App 模块数 | 6（含死代码） | 5（活跃） |
 | BSP 模块数 | 8 | 9（+ ring_buf 共用） |
