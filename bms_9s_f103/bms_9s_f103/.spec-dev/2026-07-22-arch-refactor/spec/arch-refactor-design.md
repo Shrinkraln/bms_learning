@@ -148,6 +148,11 @@ freertos.c 中的 `defaultTask`（仅 `osDelay(1000)` 空循环）SHALL 被移�
 - WHEN `osKernelInitialize()` 完成后
 - THEN `MX_FREERTOS_Init()` 内依次创建 6 个 BMS 任务
 
+#### Scenario: 任务启动前 BSP 已初始化完毕
+- GIVEN `bms_app_init()` 在 `osKernelStart()` 之前调用，已完成全部 BSP 和 App 模块初始化
+- WHEN `osKernelStart()` 启动调度器，各任务开始执行
+- THEN 所有任务看到的 BSP 外设、bms_shared、soc_ocv、protection、can_cmd 均已处于就绪状态，无竞态条件
+
 ### MODIFIED: protection_check 读运行时配置
 
 系统 SHALL 在 `protection_check()` 中从 `bms_settings_t` 读取阈值（而非编译期 `#define`），签名为：
@@ -180,7 +185,7 @@ prot_result_t protection_check(const bq76940_data_t *data,
 
 ### MODIFIED: 保护恢复增加去抖
 
-系统 SHALL 要求故障恢复需连续 3 次（与进入去抖对称）采样均正常才清除故障标志。
+系统 SHALL 要求故障恢复需连续 `PROT_FAULT_CONFIRM_CNT`（3 次）采样均正常才清除故障标志；故障进入去抖也使用同一常量 `PROT_FAULT_CONFIRM_CNT`（3 次），进入与恢复对称。
 
 #### Scenario: 瞬态恢复不误清除故障
 - GIVEN 某电芯处于过压状态
@@ -189,7 +194,14 @@ prot_result_t protection_check(const bq76940_data_t *data,
 
 ### MODIFIED: can_cmd_dispatch 返回 action 请求
 
-系统 SHALL 使 `can_cmd_dispatch()` 返回 `can_action_req_t` 结构体，而非在内部执行 BSP 调用。`can_cmd_task_entry` 根据返回的 action 调用 `bq76940_set_balancing()`、`bq76940_shutdown()` 等 BSP 函数。
+系统 SHALL 使 `can_cmd_dispatch()` 返回 `can_action_req_t` 结构体，而非在内部执行 BSP 调用。`can_cmd_task_entry` 根据返回的 action 调用 `bq76940_set_balancing()`、`bq76940_shutdown()` 等 BSP 函数。`can_cmd_dispatch()` 签名为：
+
+```c
+can_action_req_t can_cmd_dispatch(const can_msg_t *msg,
+                                   uint16_t active_faults);
+```
+
+其中 `active_faults` 由调用方从 `bms_shared` 获取后传入，供 FET 控制命令的安全条件检查使用。`can_cmd` 模块自身不访问 protection 或 bms_shared——保持纯协议解析。
 
 #### Scenario: CAN 平衡命令不直接调 BSP
 - GIVEN 收到 CAN ID 0x201，cmd=0x30（BALANCE_SET），mask=0x0003
@@ -218,6 +230,11 @@ prot_result_t protection_check(const bq76940_data_t *data,
 ### MODIFIED: can_rx_queue 封装
 
 `can_rx_queue` SHALL 改为 `static` 变量（`can_cmd.c` 内部），移除 `can_cmd.h` 中 `extern osMessageQueueId_t can_rx_queue` 声明。外部模块不可直接访问该队列。
+
+#### Scenario: 编译验证无外部引用
+- GIVEN `can_rx_queue` 改为 `static`，头文件移除 `extern` 声明
+- WHEN 全量编译
+- THEN 链接器无"未定义符号 can_rx_queue"错误（确认无外部模块依赖此符号）
 
 ### MODIFIED: CAN TX 任务快照拷贝后解锁
 
@@ -252,16 +269,31 @@ prot_result_t protection_check(const bq76940_data_t *data,
 
 ### MODIFIED: can_send 阻塞等待
 
-系统 SHALL 实现 `can_send()` 在硬件邮箱满时阻塞等待，超时返回 `CAN_DRV_TIMEOUT`，不再立即返回。
+系统 SHALL 实现 `can_send()` 在硬件邮箱满时阻塞等待（使用 FreeRTOS 计数信号量，由 `HAL_CAN_TxCpltCallback` ISR 释放），超时返回 `CAN_DRV_TIMEOUT`，不再立即返回。
 
 #### Scenario: 邮箱满时等待直到有空位
 - GIVEN CAN 硬件 3 个发送邮箱全满
 - WHEN 调用 `can_send()`
-- THEN 函数阻塞等待直到有邮箱空闲或超过 50ms 超时
+- THEN 函数在信号量上阻塞等待直到 ISR 释放信号量（邮箱空闲）或超过 50ms 超时
+
+#### Scenario: 超时返回
+- GIVEN CAN 总线持续繁忙，3 个邮箱全满超过 50ms
+- WHEN 调用 `can_send()`
+- THEN 函数在 50ms 超时后返回 `CAN_DRV_TIMEOUT`
 
 ### MODIFIED: 统一环形缓冲区
 
 系统 SHALL 提取 `BSP/Inc/ring_buf.h`（通用环形缓冲区结构体与操作函数），`usart_drv` 和 `can_drv` 均使用 `ring_buf_t` 替代各自独立的实现。
+
+#### Scenario: USART 接收仍正常工作
+- GIVEN usart_drv 已改用 `ring_buf_t` 替代原 `ring_buf_t`（自实现版本）
+- WHEN USART 中断接收数据并写入环形缓冲区
+- THEN `usart_available()` 和 `usart_recv_byte()` 行为与重构前完全一致
+
+#### Scenario: CAN 接收仍正常工作
+- GIVEN can_drv 已改用 `ring_buf_t` 替代原 `can_rx_fifo_t`
+- WHEN CAN 中断接收数据并写入环形缓冲区
+- THEN `can_available()` 和 `can_recv()` 行为与重构前完全一致
 
 ### MODIFIED: 头文件卫命名
 
@@ -292,7 +324,32 @@ prot_result_t protection_check(const bq76940_data_t *data,
 
 ### ADDED: CAN action 请求类型
 
-系统 SHALL 定义 `can_action_t` 枚举和 `can_action_req_t` 结构体，用于 can_cmd 模块向任务层传递操作意图。
+系统 SHALL 定义 `can_action_t` 枚举和 `can_action_req_t` 结构体，用于 can_cmd 模块向任务层传递操作意图。任务层的 switch 语句 SHALL 覆盖 `can_action_t` 的所有枚举值。
+
+#### Scenario: 所有 CAN 命令映射到 action
+- GIVEN 收到任何已定义的 CAN 控制命令（CLEAR_FAULT / FET_CHG_ON / FET_DSG_ON / BALANCE_SET / BALANCE_OFF / SHUTDOWN）
+- WHEN `can_cmd_dispatch()` 处理该命令
+- THEN 返回对应的非 `CAN_ACTION_NONE` action；任务层 switch 语句包含所有枚举值的 case 分支（编译器可检查）
+
+### ADDED: CMakeLists.txt 构建配置调整
+
+系统 SHALL 从 `CMakeLists.txt` 中移除 `App/Src/data_report.c` 的编译项，并在 BSP 源文件列表中新增 `BSP/Src/ring_buf.c`（如拆分为独立 .c 文件）。
+
+#### Scenario: 编译不包含 data_report
+- GIVEN CMakeLists.txt 已移除 data_report.c
+- WHEN 执行 CMake 配置和编译
+- THEN data_report.obj 不出现在链接对象列表中，无未定义符号错误
+
+### ADDED: bms_settings_t 覆盖保护所需全部阈值
+
+系统 SHALL 确保 `bms_settings_t` 包含 `protection_check()` 所需的全部阈值字段：`cell_ov_mv`、`cell_uv_mv`、`pack_ov_mv`、`pack_uv_mv`、`discharge_oc_ma`、`charge_oc_ma`、`short_circuit_ma`、`over_temp_mdeg`、`under_temp_mdeg`、`cell_diff_max_mv`。若现有字段不足，补全缺失字段。
+
+#### Scenario: settings 字段覆盖所有故障类型
+- GIVEN `bms_settings_t` 包含了所有保护阈值字段
+- WHEN `protection_check()` 执行
+- THEN 每种故障类型的阈值均可从 `settings` 参数获取，无需依赖编译期 `#define`
+
+---
 
 ---
 
@@ -300,7 +357,7 @@ prot_result_t protection_check(const bq76940_data_t *data,
 
 | 模块 | 理由 |
 |------|------|
-| soc_ocv 算法核心 | 已是项目中分层最好的模块，仅修一个精度问题 |
+| soc_ocv 模块接口 | 接口与分层结构不变，仅修正 calc_correction_weight 在 sub-second 静置时的精度丢失 |
 | 任务优先级和周期 | 现有 6 任务设计合理（acq 100ms / prot 10ms / soc 1000ms / can_tx 100ms / wdg 500ms / can_rx 事件驱动） |
 | bms_shared 双 mutex 设计 | data_mutex + settings_mutex 分离合理 |
 | BSP 模块间依赖关系 | systick → i2c_sw → bq76940 链式依赖是 DAG，无环，合理 |
@@ -308,6 +365,17 @@ prot_result_t protection_check(const bq76940_data_t *data,
 | CubeMX 外设初始化顺序 | HAL_Init → SystemClock → MX_GPIO/CAN/I2C/... → bms_app_init 顺序不变 |
 
 ## 数据结构
+
+### prot_level_t（不改，此处仅为引用上下文）
+
+```c
+typedef enum {
+    PROT_LVL_NONE     = 0U,
+    PROT_LVL_WARNING  = 1U,
+    PROT_LVL_ALERT    = 2U,
+    PROT_LVL_FAULT    = 3U,
+} prot_level_t;
+```
 
 ### prot_result_t（新增）
 
@@ -347,9 +415,11 @@ typedef struct {
 
 void     ring_buf_init(ring_buf_t *rb, uint8_t *buf, uint16_t cap);
 uint16_t ring_buf_available(const ring_buf_t *rb);
-uint8_t  ring_buf_put(ring_buf_t *rb, uint8_t byte);
-uint8_t  ring_buf_get(ring_buf_t *rb, uint8_t *byte);
+uint8_t  ring_buf_put(ring_buf_t *rb, uint8_t byte);   // 0=OK, 1=buffer full
+uint8_t  ring_buf_get(ring_buf_t *rb, uint8_t *byte);   // 0=OK, 1=buffer empty
 ```
+
+溢出行为：buffer full 时 `ring_buf_put` 丢弃新字节（drop-newest），返回 1。buffer empty 时 `ring_buf_get` 不修改 `*byte`，返回 1。
 
 ## 修改清单
 
@@ -379,7 +449,7 @@ uint8_t  ring_buf_get(ring_buf_t *rb, uint8_t *byte);
 
 | 指标 | 重构前 | 重构后 |
 |------|--------|--------|
-| FLASH | ~26.1 KB | ~25.0 KB（删 data_report 节省 ~1KB，新增代码 ~200 行 ≈ 0.8KB） |
+| FLASH | ~26.1 KB | ~25.9 KB（删 data_report 节省 ~1KB，新增 ~200 行 ≈ 0.8KB；26.1−1.0+0.8≈25.9） |
 | RAM | ~9.1 KB | ~9.9 KB（堆扩大 12KB → 更多动态可用，静态栈不变） |
 | 编译警告/错误 | 0 / 0 | 目标 0 / 0 |
 | App 模块数 | 6（含死代码） | 5（活跃） |
@@ -395,3 +465,5 @@ uint8_t  ring_buf_get(ring_buf_t *rb, uint8_t *byte);
 | 删 data_report 后若有外部工具依赖其 CAN ID | CAN ID 与 can_cmd 一致，仅 0x112 语义略有调整（现在显式命名为 CELL_VOLT3） |
 | BQ76940 多字节读加 CRC 增加 I2C 通信时间 | CRC 是 TI datasheet 推荐的标准做法，增加 ~1ms |
 | can_send 改为阻塞可能增加 CAN TX 任务耗时 | 有 50ms 超时保护，且不再持 mutex 发送，不影响其他任务 |
+| 任务创建移至 freertos.c 后若 bms_app_init 未在 osKernelStart 前完成，任务可能看到未初始化的模块 | bms_app_init 在 main.c 中 osKernelStart 之前调用（顺序不变），BSP 和外设初始化在任务开始执行前完成 |
+| 头文件卫批量重命名（14 个文件）增加 diff 噪音和合并冲突风险 | 纯机械替换（`__APP_`→`APP_`、`__BSP_`→`BSP_`），可脚本化执行；在一次重构中集中处理避免多次冲突 |
