@@ -11,10 +11,16 @@ spec_dev:
     - App/Src/bms_shared.c
     - App/Inc/bms_shared.h
     - App/Src/soc_ocv.c
+    - App/Src/data_report.c
+    - App/Inc/data_report.h
     - BSP/Src/bq76940.c
     - BSP/Src/can_drv.c
+    - BSP/Inc/can_drv.h
     - BSP/Src/usart_drv.c
+    - BSP/Inc/usart_drv.h
     - BSP/Src/i2c_sw.c
+    - BSP/Inc/ring_buf.h
+    - BSP/Inc/bsp_common.h
     - Core/Src/freertos.c
     - Core/Src/stm32f1xx_it.c
     - Core/Inc/FreeRTOSConfig.h
@@ -105,6 +111,11 @@ spec_dev:
 ### REMOVED: defaultTask 空任务
 
 freertos.c 中的 `defaultTask`（仅 `osDelay(1000)` 空循环）SHALL 被移除，释放栈空间 512 字节。
+
+#### Scenario: 无空转任务
+- GIVEN defaultTask 已移除
+- WHEN 系统启动后运行
+- THEN 仅存在 6 个 BMS 任务 + 空闲任务 + 定时器任务，无可观测的空转任务
 
 ---
 
@@ -234,9 +245,19 @@ prot_result_t protection_check(const bq76940_data_t *data,
 
 系统 SHALL 在 `bq76940_set_protection()` 中写入 OCD_TRIP、SCD_TRIP 寄存器及对应延时寄存器（原仅写 OV_TRIP/UV_TRIP）。
 
+#### Scenario: OCD/SCD 阈值配置生效
+- GIVEN 调用 `bq76940_set_protection()` 且配置了 `ocd_ma=20000, scd_ma=50000`
+- WHEN 芯片配置完成后
+- THEN OCD_TRIP 和 SCD_TRIP 寄存器值对应配置的阈值，OCD/SCD 延时寄存器也写入相应值
+
 ### MODIFIED: can_send 阻塞等待
 
 系统 SHALL 实现 `can_send()` 在硬件邮箱满时阻塞等待，超时返回 `CAN_DRV_TIMEOUT`，不再立即返回。
+
+#### Scenario: 邮箱满时等待直到有空位
+- GIVEN CAN 硬件 3 个发送邮箱全满
+- WHEN 调用 `can_send()`
+- THEN 函数阻塞等待直到有邮箱空闲或超过 50ms 超时
 
 ### MODIFIED: 统一环形缓冲区
 
@@ -249,6 +270,11 @@ prot_result_t protection_check(const bq76940_data_t *data,
 ### MODIFIED: soc_ocv 校正权重精度
 
 系统 SHALL 将 `calc_correction_weight()` 中 `weight_time` 的计算逻辑改为先计算 `rest_s = rest_ms / 1000` 再做比例缩放，消除 `(rest_ms/1000)*1000` 在 `rest_ms < 1000` 时恒为 0 的精度丢失。
+
+#### Scenario: 亚秒级静置时间正确贡献权重
+- GIVEN rest_ms = 1500（即 1.5 秒），|I| < 200mA
+- WHEN 计算 `calc_correction_weight(1500, 100)`
+- THEN weight_time = (1 × 1000) / 300 = 3（千分比），而非旧公式的 0
 
 ## ADDED Requirements
 
