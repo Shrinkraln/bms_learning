@@ -53,7 +53,7 @@ spec_dev:
 
 | 术语 | 定义 | Avoid |
 |------|------|-------|
-| batteryval[] | 全局共享数组，存放最新 BQ76940 采集数据，受 mutex_data 保护 | 共享内存、全局变量 |
+| battery_val | `bms_shared_t.battery_val` (bq76940_data_t 结构体)，存放最新 BQ76940 采集数据（电压/电流/温度），受 mutex_data 保护 | 共享内存、全局变量 |
 | protect 帧 | task_protect 产生的紧急 CAN 帧，头插入发送队列 | 告警帧、故障帧 |
 | can_pub | CAN 帧发布函数，由各任务调用，将帧放入发送队列 | can_send, can_transmit |
 | 头插 | ring_buf_put_front()，将数据写入环形缓冲区 tail 回退位置 | 优先级入队 |
@@ -109,9 +109,28 @@ Layer 3: App (纯策略/算法/协议, 5 模块) ──────────�
 | `sem_sample` | `osSemaphore` (Binary, max=1) | TIM2 ISR —(give)→ task_sample —(take)→ 采样 |
 | `mutex_data` | `osMutex` (PrioInherit) | 保护 `batteryval[]` 全局数组 |
 | `mutex_settings` | `osMutex` (PrioInherit) | 保护 `bms_settings_t` 可配置参数 |
-| `evt_protect` | `osEventFlags` (6 bit) | OV/UV/OC/SC/OT/UT 故障标志位 |
+| `evt_protect` | `osEventFlags` (12 bit) | 故障标志位 (每 bit 对应 fault_code_t 的一种故障) |
+
+### evt_protect 故障位映射
+
+| Bit | 故障码 | 触发条件 |
+|-----|--------|---------|
+| 0 | `FAULT_CELL_OV` (1<<0) | 任一电芯 > settings.cell_ov_mv |
+| 1 | `FAULT_CELL_UV` (1<<1) | 任一电芯 < settings.cell_uv_mv |
+| 2 | `FAULT_PACK_OV` (1<<2) | pack_mv > settings.pack_ov_mv |
+| 3 | `FAULT_PACK_UV` (1<<3) | pack_mv < settings.pack_uv_mv |
+| 4 | `FAULT_DISCHARGE_OC` (1<<4) | 放电电流 > settings.discharge_oc_ma |
+| 5 | `FAULT_CHARGE_OC` (1<<5) | 充电电流 > settings.charge_oc_ma |
+| 6 | `FAULT_SHORT_CIRCUIT` (1<<6) | 电流 > settings.short_circuit_ma |
+| 7 | `FAULT_OVER_TEMP` (1<<7) | 任一温度 > settings.over_temp_mdeg |
+| 8 | `FAULT_UNDER_TEMP` (1<<8) | 任一温度 < settings.under_temp_mdeg |
+| 9 | `FAULT_CELL_IMBALANCE` (1<<9) | (max_cell - min_cell) > settings.cell_diff_max_mv |
+| 10 | `FAULT_COMM_LOSS` (1<<10) | 连续 3 次 bq76940_read_all() 失败 |
+| 11 | `FAULT_WATCHDOG` (1<<11) | 启动时 wdg_is_reset_source() 检测到 |
+
+`ALL_FAULTS` 宏定义为 `0x0FFFU` (bit0-11 全掩码)，定义于 `bms_app.h`。
 | `evt_data_ready` | `osEventFlags` (1 bit) | 首次数据就绪，通知 balance/soc |
-| `q_can_tx` | `ring_buf_t` (自定义, 深度 24) | CAN TX 帧队列，支持 `put_front`(头插) 和 `put`(尾插) |
+| `q_can_tx` | `ring_buf_t` (自定义, 静态数组, 深度 24, 元素=can_msg_t 16B) | CAN TX 帧队列，支持 `put_front`(头插) 和 `put`(尾插)，满时 `put` 尾丢弃、`put_front` 头丢弃 |
 
 ## 数据流
 
@@ -122,17 +141,27 @@ TIM2 ISR (100ms, prio=5, ISR-safe)
 task_sample (prio 32)
   osSemaphoreAcquire(sem_sample)                           ← 阻塞等待
   osMutexAcquire(mutex_data)
-  ├─ bq76940_read_all() ──I2C──▶ BQ76940
+  ├─ bq76940_read_all(&data) ──I2C──▶ BQ76940
+  ├─ if ret != OK:
+  │    comm_err_cnt++
+  │    if comm_err_cnt >= 3:
+  │        osEventFlagsSet(evt_protect, FAULT_COMM_LOSS)   ← 连续 3 次失败触发
+  │    osMutexRelease(mutex_data)
+  │    goto wait_next
+  ├─ comm_err_cnt = 0
   ├─ 写入 batteryval[] 全局数组
-  ├─ 遍历检查阈值:
-  │   如有异常 → osEventFlagsSet(evt_protect, fault_bit)  ← 触发 protect
+  ├─ osMutexAcquire(mutex_settings)                        ← 读 settings 需持锁
+  │   遍历检查阈值 (对照 settings):
+  │     如有异常 → osEventFlagsSet(evt_protect, fault_bit)
+  ├─ osMutexRelease(mutex_settings)
   ├─ 首次完成 → osEventFlagsSet(evt_data_ready, 0x01)    ← 解锁 balance/soc
   └─ osMutexRelease(mutex_data)
+  wait_next:
   [等待下一个 semaphore]
 
 task_protect (prio 48, 最高优先级)
   osEventFlagsWait(evt_protect, ALL_FAULTS)               ← 阻塞, 被 set 后抢占当前任务
-  osMutexAcquire(mutex_data, 100ms)
+  osMutexAcquire(mutex_data, osWaitForever)                ← 使用 osWaitForever 避免超时跳过保护
   ├─ 读 batteryval[] 确定故障类型
   ├─ 执行保护动作
   ├─ 生成 protect CAN 帧 (ID=0x100)
@@ -142,11 +171,12 @@ task_protect (prio 48, 最高优先级)
 
 task_can_tx (prio 8)
   osDelay(100)
-  can_pub() → 生成周期上报帧
-  ring_buf_put(&q_can_tx, &periodic_frame)                 ← 尾插
+  wdg_kick()                                               ← 喂狗 (最低优先级任务兼)
+  can_pub() → 生成周期上报帧 (~4 帧/周期)
+  ring_buf_put(&q_can_tx, &periodic_frame)                 ← 尾插, 满时自动丢旧
   while (ring_buf_available(&q_can_tx)):
       ring_buf_get(&q_can_tx, &frame)                      ← 自然按优先级出队
-      can_send(&frame)
+      can_send(&frame)                                     ← 发送失败不重试, 丢帧继续
   osDelay(100)
 
 task_can_rx (prio 24)
@@ -158,12 +188,15 @@ task_can_rx (prio 24)
       0x202 配置 → 更新 settings (需 mutex_settings)
 
 task_balance (prio 16)          task_soc (prio 16)
-  首次: EventFlagsWait(DATA_READY)  首次: EventFlagsWait(DATA_READY)
+  首次: EventFlagsWait(DATA_READY, 5000ms)  ← 5s 超时, 到期不管有无数据都开始运行
+  首次: EventFlagsWait(DATA_READY, 5000ms)
   之后每 500ms:                      之后每 1000ms:
-   trylock(mutex_data)               trylock(mutex_data)
-   → 均衡策略                        → 安时积分+OCV
-   → bq76940_set_balancing()        → 更新 SOC
-   unlock(mutex_data)                unlock(mutex_data)
+   osMutexAcquire(mutex_data, 10ms)   osMutexAcquire(mutex_data, 10ms)
+   if acquired:
+     → 均衡策略 (先检查 prot_level   → 安时积分+OCV
+       非 FAULT 才执行)               → 更新 SOC
+     → bq76940_set_balancing()        osMutexRelease(mutex_data)
+     osMutexRelease(mutex_data)
    osDelay(500)                      osDelay(1000)
 ```
 
@@ -195,8 +228,8 @@ task_balance (prio 16)          task_soc (prio 16)
 |------|------|
 | 0 | 故障等级 (0=NONE, 1=WARNING, 2=ALERT, 3=FAULT) |
 | 1-2 | 活跃故障位掩码 (uint16, LSB first) |
-| 3 | 最高电芯电压高字节 (mV/10) |
-| 4 | 最低电芯电压高字节 (mV/10) |
+| 3 | 最高电芯电压 (mV/10, 0-255 对应 0-2550mV) |
+| 4 | 最低电芯电压 (mV/10, 0-255 对应 0-2550mV) |
 | 5-6 | 电流 (int16, mA/10, LSB first) |
 | 7 | 最高温度 (signed, °C offset +40) |
 
@@ -215,28 +248,39 @@ task_balance (prio 16)          task_soc (prio 16)
 
 ## ADDED Requirements
 
-### ADDED: ring_buf 支持头插入队
+### ADDED: ring_buf 通用环形缓冲区（元素级）
 
-系统 SHALL 提供 `ring_buf_put_front()` 函数，将数据写入环形缓冲区的逻辑队首（tail 回退位置），使得下一次 `ring_buf_get()` 首先获取该数据。
+系统 SHALL 提供 `BSP/Inc/ring_buf.h`，定义 `ring_buf_t` 结构体及 `ring_buf_init` / `ring_buf_put` / `ring_buf_put_front` / `ring_buf_get` / `ring_buf_available` 操作。缓冲区以固定大小元素为操作单位（`elem_size` 在 init 时设定）。满时 `put` 丢弃最旧元素（tail 前进）、`put_front` 丢弃最新元素（head 位置不变）。
 
 ```c
-/** @brief 头插入队，下一次 get 优先取出
- *  @retval 0=OK, 1=buffer full
- */
-uint8_t ring_buf_put_front(ring_buf_t *rb, uint8_t byte);
+typedef struct {
+    uint8_t *buf;          // 静态数组指针
+    uint16_t elem_size;    // 每个元素大小 (字节)
+    uint16_t capacity;     // 最大元素数
+    uint16_t head;         // 写入位置 (元素索引)
+    uint16_t tail;         // 读取位置 (元素索引)
+    uint16_t count;        // 当前元素数
+} ring_buf_t;
+
+void     ring_buf_init(ring_buf_t *rb, uint8_t *buf, uint16_t elem_size, uint16_t capacity);
+uint16_t ring_buf_available(const ring_buf_t *rb);
+uint8_t  ring_buf_put(ring_buf_t *rb, const void *elem);        // 尾插, 0=OK, 1=满(尾丢弃)
+uint8_t  ring_buf_put_front(ring_buf_t *rb, const void *elem);  // 头插, 0=OK, 1=满(头丢弃)
+uint8_t  ring_buf_get(ring_buf_t *rb, void *elem);              // 取队首, 0=OK, 1=空
 ```
 
-溢出行为：buffer full 时丢弃新字节，返回 1。
+`put` 满时行为: 丢弃 tail 位置的旧元素，tail 前进，写入新元素到 head。
+`put_front` 满时行为: head 不动，覆盖其前一个位置（逻辑队首）。
 
-#### Scenario: protect 帧先于周期帧发送
-- GIVEN q_can_tx 中有 2 帧周期数据 (ID=0x110, 0x111)
+#### Scenario: protect 帧头插后优先出队
+- GIVEN q_can_tx 中有 2 帧周期数据 (can_msg_t, 各 16B, ID=0x110, 0x111)
 - WHEN task_protect 调用 ring_buf_put_front(&q_can_tx, &fault_frame)
-- THEN 下一次 ring_buf_get 返回 protect 帧，随后依次返回 0x110、0x111
+- THEN 下一次 ring_buf_get 返回 protect 帧 (ID=0x100)，随后依次返回 0x110、0x111
 
-#### Scenario: 队列满时头插丢弃
+#### Scenario: 队列满时尾插覆盖最旧
 - GIVEN q_can_tx 已满 (24 帧)
-- WHEN 调用 ring_buf_put_front()
-- THEN 返回 1 (buffer full)，队列内容不变
+- WHEN can_pub 调用 ring_buf_put() 尾插新帧
+- THEN 最旧的 1 帧被丢弃 (tail+1)，新帧写入 head 位置，返回 1 (指示发生过丢弃)
 
 ### ADDED: 6 任务 FreeRTOS 架构
 
@@ -554,16 +598,28 @@ void bms_app_init(void);  // 初始化全部模块 + 创建 6 个任务 + 5 个�
 | 项目 | 大小 | 备注 |
 |------|------|------|
 | FreeRTOS 堆 | 12288 B | configTOTAL_HEAP_SIZE |
+| **任务栈** | | |
 | task_sample (2048B) + task_soc (2048B) | 4096 B | 含 I2C 栈帧 + 浮点运算 |
 | task_protect (1024B) + task_balance (1024B) | 2048 B | |
 | task_can_rx (1024B) + task_can_tx (1024B) | 2048 B | |
-| 同步原语 (2 mutex + 1 semaphore + 2 eventflags) | ~400 B | |
-| q_can_tx (24 × 16B) | 384 B | ring_buf 静态数组 |
-| 内核开销 (定时器+空闲+TCB overhead) | ~2048 B | |
-| **堆使用合计** | **~11 KB** | 余量 ~1 KB |
-| 静态数据 (.data+.bss, 不含堆) | ~6 KB | 全局变量 + 系统栈 |
-| .noinit 故障诊断 | 20 B | 5×uint32_t |
-| **SRAM 总计** | **~17 KB / 20 KB** | 余量 ~3 KB |
+| **RTOS 控制块** | | |
+| 6 × TCB (每任务 ~120B) | ~720 B | FreeRTOS + CMSIS-RTOS2 |
+| 2 × EventGroups | ~200 B | evt_protect + evt_data_ready |
+| 2 × Mutex | ~160 B | mutex_data + mutex_settings |
+| 1 × Semaphore | ~80 B | sem_sample |
+| **内核开销** | | |
+| FreeRTOS 定时器任务栈 (256w) + TCB | ~1200 B | configUSE_TIMERS=1 |
+| 空闲任务栈 (128w) + TCB | ~600 B | |
+| 堆管理开销 (heap_4 BlockLink_t) | ~400 B | |
+| **堆使用合计** | **~11.5 KB** | 余量 ~0.8 KB |
+| **静态数据** (.data+.bss) | | |
+| q_can_tx 静态数组 (24 × 16B) | 384 B | ring_buf 静态分配 |
+| bms_shared_t 全局实例 | ~128 B | |
+| CSTACK (系统栈) | 1024 B | 链接器脚本分配 |
+| 其他全局 + HAL + CubeMX | ~3.5 KB | |
+| .noinit 故障诊断 (5×uint32_t) | 20 B | |
+| **静态数据合计** | **~5.0 KB** | |
+| **SRAM 总计** | **~16.5 KB / 20 KB** | 余量 ~3.5 KB |
 
 ## 风险
 
