@@ -38,7 +38,7 @@ spec_dev:
     - App/Inc/bms_app.h
     - App/Src/bms_app.c
     - CMakeLists.txt
-  status: draft
+  status: active
 ---
 
 # BMS 9S F103 全栈架构重新设计
