@@ -22,13 +22,15 @@ spec_dev:
 
 ## 背景与目标
 
+> **架构依赖**: 本 spec 假定 `bms-fullstack-redesign`（`.spec-dev/2026-07-26-bms-fullstack-redesign/`）中的 7 任务事件驱动架构、同步原语（`mutex_iic`、`q_can_tx`、`ring_buf_put_front`、`evt_protect`）及 `protection_check` 新签名均已实现。实施计划需将 fullstack-redesign 排在 comm-loss 之前。
+
 BQ76940 通过 I2C 与 MCU 通信。I2C 总线可能因电磁干扰、连接器松动、芯片异常复位等原因中断。当前代码 (`protection_check`) 仅在数据 `valid` 标志无效时静态检查——无超时检测、无误计数、无独立响应路径，且 `FAULT_COMM_LOSS` 在故障分级中未被任何分支匹配（bug：通信丢失静默落入 `PROT_LVL_NONE`）。
 
 本次变更在 i2c_sw 层增加位带超时、在 bq76940 层计连续超时次数、新增 `task_iic_error`（优先级 5）做独立 CAN 紧急上报，并修复 `protection_check` 中 COMM_LOSS 的遗留缺陷。
 
 **成功标准**：
 - I2C 总线任意位带操作超时可被检测（不再死等）
-- 连续 2 次 I2C 超时后 ≤ 1 个 RTOS tick 内发送 CAN 紧急帧
+- 连续 2 次 I2C 超时后 ≤ 1 个 RTOS tick 内将 CAN 紧急帧头插入发送队列（实际 CAN 总线传输由 task_can_tx 在下一个 100ms 周期执行）
 - 通信恢复后立即发送恢复帧
 - BQ76940 硬件保护在通信中断期间持续自治运行
 
@@ -53,9 +55,9 @@ BQ76940 通过 I2C 与 MCU 通信。I2C 总线可能因电磁干扰、连接器�
 
 | 模块 | 影响 | 改动量 |
 |------|------|--------|
-| `i2c_sw.h/c` | 新增 `I2C_SW_TIMEOUT` 返回值；`i2c_send_byte`/`i2c_recv_byte` 加循环超时 | ~30 行 |
+| `i2c_sw.h/c` | 在 `i2c_send_byte`/`i2c_recv_byte` 加超时循环（使已有枚举值 `I2C_SW_TIMEOUT=0x02` 可被实际返回） + 新增 `I2C_SW_TIMEOUT_CYCLES` 宏 | ~30 行 |
 | `bq76940.h/c` | 新增 `comm_timeout_track()` 静态函数 + `comm_timeout_cnt`/`comm_is_faulted` 静态变量；`read_cells` 错误路径补 `.valid=0`；新增 `bq76940_is_faulted()` getter | ~40 行 |
-| `protection.h/c` | 移除 `FAULT_COMM_LOSS` 检测逻辑；`ALL_FAULTS` 宏排除 bit10 | ~5 行 |
+| `protection.c` | 移除 `FAULT_COMM_LOSS` 检测逻辑（data.valid 检查代码段） | ~5 行 |
 | `can_cmd.h/c` | `can_pub` 新增 `can_pub_build_fault()` / `can_pub_build_recovered()` 接口（供 task_iic_error 和 task_protect 共用） | ~20 行 |
 | `bms_app.h/c` | 新增 task_iic_error 任务函数 + sem_iic 信号量；任务优先级从 6 任务更新为 7 任务 | ~50 行 |
 
@@ -80,7 +82,7 @@ BQ76940 通过 I2C 与 MCU 通信。I2C 总线可能因电磁干扰、连接器�
 
 #### Requirement: i2c_sw 位带操作 SHALL 具备超时检测
 
-每条 `i2c_send_byte()` 和 `i2c_recv_byte()` 调用中，SCL 拉高后等待 SDA 变化的循环 SHALL 有最大迭代次数限制。超时后 SHALL 返回 `I2C_SW_TIMEOUT`（新增枚举值 `0x06`），并释放 SCL（拉低）终止当前事务。
+每条 `i2c_send_byte()` 和 `i2c_recv_byte()` 调用中，SCL 拉高后等待 SDA 变化的循环 SHALL 有最大迭代次数限制。超时后 SHALL 返回 `I2C_SW_TIMEOUT`（枚举值 `0x02`，已在 `i2c_sw.h` 中定义但当前未使用），并释放 SCL（拉低）终止当前事务。
 
 ##### Scenario: ACK 位超时
 
@@ -166,7 +168,7 @@ task_iic_error（优先级 5，栈 1024B）SHALL 以 `osSemaphoreAcquire(sem_iic
 
 原行为：`protection_check()` 检查 `data->cells.valid` 和 `data->temps.valid`，无效时设置 `FAULT_COMM_LOSS`。
 
-新行为：`protection_check()` SHALL 仅检查电压/电流/温度阈值。COMM_LOSS 检测完全由 bq76940 层的 `comm_timeout_track()` 负责。`FAULT_COMM_LOSS` 保留在 `fault_code_t` 枚举中供 CAN 帧编码使用，但 `protection_check()` 内部不再产生此故障码。`ALL_FAULTS` 宏 SHALL 更新为 `0x0EFF`（排除 bit10）。
+新行为：`protection_check()` SHALL 仅检查电压/电流/温度阈值。COMM_LOSS 检测完全由 bq76940 层的 `comm_timeout_track()` 负责。`FAULT_COMM_LOSS` 保留在 `fault_code_t` 枚举中供 CAN 帧编码使用，但 `protection_check()` 内部不再产生此故障码。`ALL_FAULTS` 宏 SHALL 更新为 `0x0BFF`（排除 bit10: `0x0FFF & ~(1<<10) = 0x0BFF`）。
 
 ##### Scenario: protection_check 收到无效数据不设 COMM_LOSS
 
@@ -191,6 +193,12 @@ task_iic_error（优先级 5，栈 1024B）SHALL 以 `osSemaphoreAcquire(sem_iic
 原行为：switch 仅映射 `I2C_SW_OK`、`I2C_SW_NACK`、`I2C_SW_CRC_ERROR`，default → `BQ76940_ERROR`。
 
 新行为：switch SHALL 增加 `I2C_SW_TIMEOUT → BQ76940_I2C_ERROR` 的显式映射。超时与 NACK 均视为 I2C 通信错误。`comm_timeout_track()` 在收到 `BQ76940_I2C_ERROR` 时递增超时计数器。
+
+##### Scenario: I2C 超时映射为 I2C_ERROR
+
+- **GIVEN** `i2c_sw_read_crc()` 或 `i2c_sw_write_crc()` 因位带超时返回 `I2C_SW_TIMEOUT`
+- **WHEN** `bq76940_reg_read()` 或 `bq76940_reg_write()` 的 switch 执行
+- **THEN** 函数返回 `BQ76940_I2C_ERROR`（而非 `BQ76940_ERROR`），`comm_timeout_track()` 收到 `BQ76940_I2C_ERROR` 并递增超时计数器
 
 ### REMOVED Requirements
 
@@ -296,7 +304,7 @@ task_iic_error（优先级 5，栈 1024B）SHALL 以 `osSemaphoreAcquire(sem_iic
 typedef enum {
     I2C_SW_OK       = 0x00U,
     I2C_SW_ERROR    = 0x01U,
-    I2C_SW_TIMEOUT  = 0x06U,  // NEW: 位带操作超时
+    I2C_SW_TIMEOUT  = 0x02U,  // already defined; added timeout loop to produce it
     // ... existing values unchanged
 } i2c_sw_status_t;
 
@@ -338,11 +346,13 @@ static void iic_error_task(void *arg);
 // 注: osPriorityRealtime 对应 CMSIS-RTOS 数值 48，高于 osPriorityHigh (24)
 ```
 
-#### protection — 宏更新
+#### bms_app — ALL_FAULTS 宏更新
+
+`ALL_FAULTS` 宏（定义于 `bms_app.h`）SHALL 排除 `FAULT_COMM_LOSS` (bit10):
 
 ```c
-// ALL_FAULTS 排除 COMM_LOSS (bit10)
-#define ALL_FAULTS  0x0EFFU  // was 0x0FFF
+// ALL_FAULTS 排除 COMM_LOSS (bit10), 用于 evt_protect EventFlagsWait
+#define ALL_FAULTS  0x0BFFU  // was 0x0FFF, excluding COMM_LOSS (bit10)
 ```
 
 ### 错误处理
@@ -395,14 +405,13 @@ static void iic_error_task(void *arg);
 
 | 文件 | 操作 | 改动量 |
 |------|------|--------|
-| `BSP/Inc/i2c_sw.h` | 修改 | 新增 `I2C_SW_TIMEOUT` 枚举 + `I2C_SW_TIMEOUT_CYCLES` 宏 |
+| `BSP/Inc/i2c_sw.h` | 修改 | 新增 `I2C_SW_TIMEOUT_CYCLES` 宏（`I2C_SW_TIMEOUT=0x02` 枚举值已存在） |
 | `BSP/Src/i2c_sw.c` | 修改 | `i2c_send_byte` + `i2c_recv_byte` 加超时循环 |
 | `BSP/Inc/bq76940.h` | 修改 | 新增 `bq76940_is_faulted()` 声明 |
 | `BSP/Src/bq76940.c` | 修改 | 新增 `comm_timeout_track()` + 静态变量；`read_cells` 补 `valid=0`；`reg_read/write` switch 加 TIMEOUT 映射 |
-| `App/Inc/protection.h` | 修改 | `ALL_FAULTS` 宏更新 |
-| `App/Src/protection.c` | 修改 | 移除 COMM_LOSS 检测代码段 |
+| `App/Src/protection.c` | 修改 | 移除 COMM_LOSS 检测代码段（data.valid 检查） |
 | `App/Inc/can_cmd.h` | 修改 | 新增 `can_pub_build_fault()` / `can_pub_build_recovered()` 声明 |
 | `App/Src/can_cmd.c` | 修改 | 实现两个新接口 |
-| `App/Inc/bms_app.h` | 修改 | 7 任务优先级表 + `sem_iic` 声明 |
+| `App/Inc/bms_app.h` | 修改 | `ALL_FAULTS` 宏更新 + 7 任务优先级表 + `sem_iic` 声明 |
 | `App/Src/bms_app.c` | 修改 | 新增 task_iic_error 任务函数 + sem_iic 创建 + 优先级调整 |
 | `.spec-dev/adr/0006-iic-error-task-priority.md` | **新增** | ADR 记录 |
