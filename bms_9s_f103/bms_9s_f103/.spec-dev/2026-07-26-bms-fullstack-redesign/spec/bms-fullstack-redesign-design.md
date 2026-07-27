@@ -106,12 +106,29 @@ Layer 3: App (纯策略/算法/协议, 5 模块) ──────────�
 
 | 名称 | 类型 | 用途 |
 |------|------|------|
+| `mutex_iic` | `osMutex` (PrioInherit) | **I2C 总线互斥**。task_sample 读 BQ76940 与 task_protect 写 BQ76940 寄存器互斥 |
+| `mutex_data` | `osMutex` (PrioInherit) | 保护 `batteryval[]` 全局数组 (含 bq_data + prot_ctx + SOC/OCV) |
+| `mutex_settings` | `osMutex` (PrioInherit) | 保护 `bms_settings_t` 可配置参数。仅 can_rx config 更新时持有；task_sample 在 mutex_iic 临界区内短暂获取做快照拷贝 |
 | `sem_sample` | `osSemaphore` (Binary, max=1) | TIM2 ISR —(give)→ task_sample —(take)→ 采样 |
-| `mutex_data` | `osMutex` (PrioInherit) | 保护 `batteryval[]` 全局数组 |
-| `mutex_settings` | `osMutex` (PrioInherit) | 保护 `bms_settings_t` 可配置参数 |
-| `evt_protect` | `osEventFlags` (12 bit) | 故障标志位 (每 bit 对应 fault_code_t 的一种故障) |
+| `evt_protect` | `osEventFlags` (12 bit) | 故障标志位。task_sample set (故障进入 + 故障恢复均 set)，task_protect 处理后 clear |
+| `evt_data_ready` | `osEventFlags` (1 bit) | 首次数据就绪，通知 balance/soc。永不清除 |
+| `q_can_tx` | `ring_buf_t` (静态数组, 24×16B) | CAN TX 帧队列，`put_front`(protect 帧头插) / `put`(周期帧尾插)。仅任务上下文访问，无需 ISR 安全 |
 
-### evt_protect 故障位映射
+### 锁层级
+
+```
+mutex_iic           ← 最外层：I2C 总线互斥
+  └─ mutex_data     ← 内层：batteryval[] 数据保护
+       (mutex_settings 仅在 mutex_iic 内短暂获取做快照)
+mutex_settings      ← 独立锁：can_rx config 更新时不需 iic/data
+```
+
+### evt_protect 故障位映射 + 生命周期
+
+task_sample 调用 protection_check() 获得 prot_result_t 后：
+- **故障进入**: `active_faults` 从 0→非 0 → `osEventFlagsSet(evt_protect, active_faults)` → task_protect 被唤醒执行保护动作
+- **故障恢复**: `active_faults` 从 非 0→0 → `osEventFlagsSet(evt_protect, 0x0001)` (bit0 作为"恢复通知"标志) → task_protect 被唤醒执行 FET 恢复
+- task_protect 处理完成后调用 `osEventFlagsClear(evt_protect, handled_bits)` 清除已处理的位
 
 | Bit | 故障码 | 触发条件 |
 |-----|--------|---------|
@@ -129,50 +146,85 @@ Layer 3: App (纯策略/算法/协议, 5 模块) ──────────�
 | 11 | `FAULT_WATCHDOG` (1<<11) | 启动时 wdg_is_reset_source() 检测到 |
 
 `ALL_FAULTS` 宏定义为 `0x0FFFU` (bit0-11 全掩码)，定义于 `bms_app.h`。
-| `evt_data_ready` | `osEventFlags` (1 bit) | 首次数据就绪，通知 balance/soc |
-| `q_can_tx` | `ring_buf_t` (自定义, 静态数组, 深度 24, 元素=can_msg_t 16B) | CAN TX 帧队列，支持 `put_front`(头插) 和 `put`(尾插)，满时 `put` 尾丢弃、`put_front` 头丢弃 |
+`PROT_RECOVERED` 宏定义为 `0x0001U` (bit0)，task_sample 在故障恢复时 set，task_protect 据此执行 FET 恢复。
 
 ## 数据流
 
 ```
-TIM2 ISR (100ms, prio=5, ISR-safe)
+TIM2 ISR (100ms, NVIC prio=5, ISR-safe)
   │ osSemaphoreRelease(sem_sample)                        ← 从 ISR 释放信号量
   ▼
 task_sample (prio 32)
-  osSemaphoreAcquire(sem_sample)                           ← 阻塞等待
-  osMutexAcquire(mutex_data)
-  ├─ bq76940_read_all(&data) ──I2C──▶ BQ76940
+  osSemaphoreAcquire(sem_sample)                           ← 阻塞等信号量
+  │
+  osMutexAcquire(mutex_iic, osWaitForever)                ← ① 获取 I2C 总线
+  bq76940_read_all(&data) ──I2C──▶ BQ76940                ← ② I2C 读取 (~1-2ms)
+  │
   ├─ if ret != OK:
-  │    comm_err_cnt++
+  │    comm_err_cnt++                                      ← static 局部变量
   │    if comm_err_cnt >= 3:
-  │        osEventFlagsSet(evt_protect, FAULT_COMM_LOSS)   ← 连续 3 次失败触发
-  │    osMutexRelease(mutex_data)
+  │        osEventFlagsSet(evt_protect, FAULT_COMM_LOSS)   ← 通信丢失
+  │    osMutexRelease(mutex_iic)
   │    goto wait_next
   ├─ comm_err_cnt = 0
-  ├─ 写入 batteryval[] 全局数组
-  ├─ osMutexAcquire(mutex_settings)                        ← 读 settings 需持锁
-  │   遍历检查阈值 (对照 settings):
-  │     如有异常 → osEventFlagsSet(evt_protect, fault_bit)
+  │
+  ├─ osMutexAcquire(mutex_settings, 10ms)                 ← ③ 短暂持锁快照
+  │    settings_snapshot = bms_settings                    ← 栈上快照
   ├─ osMutexRelease(mutex_settings)
-  ├─ 首次完成 → osEventFlagsSet(evt_data_ready, 0x01)    ← 解锁 balance/soc
-  └─ osMutexRelease(mutex_data)
+  │
+  osMutexAcquire(mutex_data, osWaitForever)                ← ④ 获取数据锁 (iic 内层)
+  ├─ batteryval[] = data                                  ← ⑤ 写入采集数据
+  ├─ prot_result = protection_check(&data, &snapshot)      ← ⑥ 完整诊断 + 去抖
+  ├─ 写 prot_result 到 batteryval[].prot_ctx
+  │
+  ├─ if prot_result.active_faults != 0:                    ← ⑦ 故障进入
+  │    osEventFlagsSet(evt_protect, prot_result.active_faults)
+  ├─ else if 上次有故障:                                    ← ⑧ 故障恢复 (对称)
+  │    osEventFlagsSet(evt_protect, PROT_RECOVERED)
+  │
+  ├─ if !data_ready_flag:                                  ← ⑨ 首次数据就绪
+  │    osEventFlagsSet(evt_data_ready, 0x01)
+  │    data_ready_flag = true
+  │
+  osMutexRelease(mutex_data)                               ← ⑩ 释放数据锁
+  osMutexRelease(mutex_iic)                                ← ⑪ 释放 I2C 总线
   wait_next:
   [等待下一个 semaphore]
 
 task_protect (prio 48, 最高优先级)
   osEventFlagsWait(evt_protect, ALL_FAULTS)               ← 阻塞, 被 set 后抢占当前任务
-  osMutexAcquire(mutex_data, osWaitForever)                ← 使用 osWaitForever 避免超时跳过保护
-  ├─ 读 batteryval[] 确定故障类型
-  ├─ 执行保护动作
-  ├─ 生成 protect CAN 帧 (ID=0x100)
-  └─ osMutexRelease(mutex_data)
-  ring_buf_put_front(&q_can_tx, &protect_frame)            ← 头插, 下一次优先发送
-  [回到 EventFlagsWait 阻塞]
+  │
+  osMutexAcquire(mutex_iic, osWaitForever)                ← ① 获取 I2C 控制权
+  │ (此时 task_sample 被阻塞在 mutex_iic 上, 不会并發 I2C)
+  │
+  ├─ 读 batteryval[].prot_ctx 确定故障类型                 ← ② 无需持 mutex_data
+  │   (sample 已写完并释放 data 锁)
+  │
+  ├─ if 故障进入 (PROT_LVL_ALERT 或 FAULT):
+  │    ├─ 写 BQ76940 SYS_CTRL2: CHG/DSG bit              ← ③ FET 动作 (片内 FET 驱动器)
+  │    │   - PROT_LVL_FAULT: CHG=0, DSG=0 (全关)
+  │    │   - PROT_LVL_ALERT + 充电故障: CHG=0 (关充电)
+  │    │   - PROT_LVL_ALERT + 放电故障: DSG=0 (关放电)
+  │    └─ 写 BQ76940 PROTECT1/PROTECT2: 清除硬件锁存标志  ← ④ 清除芯片故障位
+  │
+  ├─ else if 故障恢复 (PROT_RECOVERED):
+  │    └─ 写 BQ76940 SYS_CTRL2: CHG=1, DSG=1 (全开)     ← ⑤ FET 恢复
+  │
+  osMutexRelease(mutex_iic)                                ← ⑥ 释放 I2C
+  │
+  生成 protect CAN 帧 (ID=0x100, DLC=8)                   ← ⑦ 紧急上报
+  ring_buf_put_front(&q_can_tx, &protect_frame)            ← ⑧ 头插优先发送
+  │
+  osEventFlagsClear(evt_protect, handled_bits)             ← ⑨ 清除已处理故障位
+  goto wait_next                                           ← 回到阻塞
 
 task_can_tx (prio 8)
   osDelay(100)
   wdg_kick()                                               ← 喂狗 (最低优先级任务兼)
-  can_pub() → 生成周期上报帧 (~4 帧/周期)
+  osMutexAcquire(mutex_data, 10ms)                         ← 快照拷贝
+  if acquired:
+      can_pub(&snapshot) → 生成周期上报帧 (~4 帧/周期)
+  osMutexRelease(mutex_data)
   ring_buf_put(&q_can_tx, &periodic_frame)                 ← 尾插, 满时自动丢旧
   while (ring_buf_available(&q_can_tx)):
       ring_buf_get(&q_can_tx, &frame)                      ← 自然按优先级出队
@@ -184,21 +236,28 @@ task_can_rx (prio 24)
   while can_available():
       can_recv(&frame)
       0x200 查询 → 立即回传指定数据
-      0x201 控制 → FET/均衡/清除故障/关机
-      0x202 配置 → 更新 settings (需 mutex_settings)
+      0x201 控制 → 返回 can_action_req_t, 任务层执行 BSP 操作
+      0x202 配置 → osMutexAcquire(mutex_settings) → 更新 → osMutexRelease
 
 task_balance (prio 16)          task_soc (prio 16)
-  首次: EventFlagsWait(DATA_READY, 5000ms)  ← 5s 超时, 到期不管有无数据都开始运行
+  首次: EventFlagsWait(DATA_READY, 5000ms)  ← 5s 超时
   首次: EventFlagsWait(DATA_READY, 5000ms)
   之后每 500ms:                      之后每 1000ms:
    osMutexAcquire(mutex_data, 10ms)   osMutexAcquire(mutex_data, 10ms)
-   if acquired:
-     → 均衡策略 (先检查 prot_level   → 安时积分+OCV
-       非 FAULT 才执行)               → 更新 SOC
-     → bq76940_set_balancing()        osMutexRelease(mutex_data)
+   if acquired:                       if acquired:
+     → 均衡策略 (非 FAULT 才执行)       → 安时积分+OCV
+     → osMutexAcquire(mutex_iic, 10ms) → 更新 SOC
+       bq76940_set_balancing()          osMutexRelease(mutex_data)
+       osMutexRelease(mutex_iic)
      osMutexRelease(mutex_data)
    osDelay(500)                      osDelay(1000)
 ```
+
+**关键时序保证**:
+- task_sample 持 `mutex_iic` 期间完成 I2C 读 + 保护诊断 + batteryval[] 写，task_protect 在此期间被阻塞在 `mutex_iic` 上
+- task_protect 被 evt_protect 唤醒后抢占总线，但需等 task_sample 释放 `mutex_iic` 才能操作 BQ76940
+- I2C 操作绝不存在并发——总是先获取 `mutex_iic` 的持有者独占
+- `mutex_data` 嵌套在 `mutex_iic` 内部，保证 batteryval[] 更新与 I2C 操作的原子性
 
 ## CAN 协议
 
@@ -288,14 +347,14 @@ uint8_t  ring_buf_get(ring_buf_t *rb, void *elem);              // 取队首, 0=
 
 #### Scenario: 全部任务正常创建
 - GIVEN FreeRTOS 堆为 12288 字节
-- WHEN bms_app_init() 依次创建 6 个任务 + 4 个同步原语 + 1 个 ring_buf
+- WHEN bms_app_init() 依次创建 6 个任务 + 7 个同步原语 + 1 个 ring_buf
 - THEN 所有 osThreadNew/sync create 返回非 NULL，调度器启动后全部任务进入就绪/阻塞状态
 
-#### Scenario: protect 抢占 task_sample
-- GIVEN task_sample 持有 mutex_data 正在读取 I2C
-- WHEN task_sample 调用 osEventFlagsSet(evt_protect, FAULT_CELL_OV)
-- AND task_protect (prio 48) 从 osEventFlagsWait 被唤醒
-- THEN task_protect 立即抢占 task_sample，在 task_sample 释放 mutex 之前即开始执行
+#### Scenario: protect 等待 mutex_iic
+- GIVEN task_sample 持有 mutex_iic 正在执行 I2C 读取
+- WHEN task_sample set evt_protect 后 task_protect (prio 48) 被唤醒并抢占
+- THEN task_protect 立即抢占 task_sample，但在 osMutexAcquire(mutex_iic) 上阻塞，直到 task_sample 释放 mutex_iic
+- AND 不存在 I2C 并发访问
 
 #### Scenario: protect 帧头插队列
 - GIVEN task_can_tx 即将在下个周期发送队列中的帧
@@ -320,21 +379,51 @@ uint8_t  ring_buf_get(ring_buf_t *rb, void *elem);              // 取队首, 0=
 
 系统 SHALL 提供 `BSP/Inc/bsp_common.h`，定义 `bsp_status_t` 枚举 (OK/ERROR/BUSY/TIMEOUT)。各 BSP 模块 SHALL typedef 各自的类型别名。
 
+### ADDED: mutex_iic I2C 总线互斥锁
+
+系统 SHALL 创建 `mutex_iic` (osMutex, PrioInherit) 保护 BQ76940 I2C 总线访问。锁层级 SHALL 为 `mutex_iic` → `mutex_data`（data 嵌套在 iic 内部）。task_sample 在 I2C 读取前获取 `mutex_iic`；task_protect 在写 BQ76940 寄存器前获取 `mutex_iic`；task_balance 在调 `bq76940_set_balancing()` 前获取 `mutex_iic`。
+
+#### Scenario: I2C 操作互斥
+- GIVEN task_sample 持有 mutex_iic 正在读取 BQ76940
+- WHEN task_protect 被 evt_protect 唤醒并尝试 osMutexAcquire(mutex_iic)
+- THEN task_protect 在 mutex_iic 上阻塞，直到 task_sample 释放
+- AND task_sample 释放 mutex_iic 后，task_protect 立即获得锁并执行寄存器写入
+
+### ADDED: evt_protect 对称通知（故障进入 + 故障恢复）
+
+task_sample SHALL 在调用 protection_check() 后根据 prot_result_t 设置 evt_protect：
+- **故障进入**: `active_faults` 从 0→非 0 → `osEventFlagsSet(evt_protect, active_faults)`
+- **故障恢复**: `active_faults` 从非 0→0 且上次有故障 → `osEventFlagsSet(evt_protect, PROT_RECOVERED)` (bit0)
+
+task_protect SHALL 在处理完成后调用 `osEventFlagsClear(evt_protect, handled_bits)` 清除已处理位。
+
+#### Scenario: 故障进入触发保护动作
+- GIVEN 当前无故障，task_sample 检测到 CELL_OV
+- WHEN task_sample set evt_protect FAULT_CELL_OV bit
+- THEN task_protect 被唤醒，获取 mutex_iic，写 BQ76940 SYS_CTRL2 关闭 CHG FET
+
+#### Scenario: 故障恢复触发 FET 重开
+- GIVEN 之前存在 CELL_OV 故障已触发 CHG FET 关闭
+- WHEN task_sample 连续 3 次检测电压正常，protection_check 返回 PROT_LVL_NONE
+- THEN task_sample set evt_protect PROT_RECOVERED bit
+- AND task_protect 被唤醒，获取 mutex_iic，写 BQ76940 SYS_CTRL2 重新开启 FET
+
 ### ADDED: bms_settings_t 覆盖全部保护阈值
 
 `bms_settings_t` SHALL 包含: `cell_ov_mv`, `cell_uv_mv`, `pack_ov_mv`, `pack_uv_mv`, `discharge_oc_ma`, `charge_oc_ma`, `short_circuit_ma`, `over_temp_mdeg`, `under_temp_mdeg`, `cell_diff_max_mv`, `balance_thresh_mv`, `balance_min_mv`。
 
-### ADDED: protection_check 读运行时配置
+### ADDED: protection_check 由 task_sample 调用
 
-`protection_check()` SHALL 从 `bms_settings_t` 读取阈值（而非编译期 `#define`），签名为:
+`protection_check()` SHALL 由 task_sample 在 mutex_data 临界区内调用（settings 已通过栈上快照获取）。签名为:
 ```c
 prot_result_t protection_check(const bq76940_data_t *data,
                                 const bms_settings_t *settings);
 ```
+函数内部 SHALL NOT 调用任何 BSP 函数（零 HAL 调用、零 io_ctrl 调用、零 bsp_tick_get 调用）。12 种故障各使用独立的去抖计数器 (fault_confirm_cnt[12])，进入/恢复均为 3 次确认。
 
 ### ADDED: protection_check 返回 prot_result_t
 
-`protection_check()` SHALL 返回 `prot_result_t` 结构体，包含 `level` (保护等级)、`active_faults` (活跃故障位掩码)、`request_power_off` (需断电标志)。函数内部 SHALL NOT 调用任何 BSP 函数。
+`protection_check()` SHALL 返回 `prot_result_t` 结构体，包含 `level` (保护等级)、`active_faults` (活跃故障位掩码)、`latched_faults` (锁存故障掩码)、`fet` (期望 FET 状态)、`request_power_off` (需断电标志)。
 
 ### ADDED: can_cmd_dispatch 返回 can_action_req_t
 
@@ -405,6 +494,48 @@ task_protect SHALL 以 `osEventFlagsWait(evt_protect, ...)` 阻塞，不再周�
 ### REMOVED: defaultTask 空任务
 
 `freertos.c` 中的 `defaultTask`（仅 `osDelay(1000)` 空循环）SHALL 被移除，释放栈空间 512 字节。
+
+---
+
+## 算法实现细节
+
+### soc_ocv: 校正权重精度修正
+
+`calc_correction_weight()` 中 `weight_time` 的计算 SHALL 修改为:
+
+```c
+// 旧 (有精度问题):
+// uint32_t weight_time = (rest_ms / 1000U) * 1000U / REST_FULL_WEIGHT_S;
+// 问题: rest_ms < 1000 时 rest_ms/1000 = 0, weight_time 恒为 0
+
+// 新:
+uint32_t weight_time = rest_ms * 10U / (REST_FULL_WEIGHT_S * 10U);
+// rest_ms=1500 → weight_time = 1500*10/3000 = 5 (permille)
+// rest_ms=500  → weight_time = 500*10/3000 = 1 (permille, 不再恒为 0)
+```
+
+### bq76940: 多字节读加 CRC8 验证
+
+`bq76940_read_cells()` SHALL 使用 `i2c_sw_read_crc()` 替代 `i2c_sw_read_buf()` 读取 18 字节电芯电压数据。`bq76940_read_temps()` 和 `bq76940_read_current()` 同理。CRC8 多项式: 0x07 (BQ76940 datasheet SLUSC25B)。
+
+### bq76940: 补全 OCD/SCD 保护寄存器写入
+
+`bq76940_set_protection()` SHALL 写入以下寄存器（当前仅写 OV_TRIP/UV_TRIP）:
+- `OCD_TRIP` (0x0C-0x0D): 过流放电阈值
+- `SCD_TRIP` (0x0E-0x0F): 短路放电阈值
+- 对应延时寄存器 (OV_DELAY/UV_DELAY/OCD_DELAY/SCD_DELAY)
+
+### protection: 移除 BSP 调用
+
+`protection_check()` SHALL 移除内部 `io_ctrl_power_off_all()` 和 `bsp_tick_get()` 调用。紧急断电通过 `prot_result_t.request_power_off = true` 标志返回，由 task_protect 执行。
+
+### FET 控制: 改用 BQ76940 SYS_CTRL2
+
+FET 控制 SHALL 通过写 BQ76940 `SYS_CTRL2` 寄存器的 CHG (bit0) / DSG (bit1) 位控制片内 FET 驱动器。io_ctrl 模块不再管理外部 FET GPIO。
+
+### protection: 统一去抖策略
+
+所有 12 种故障类型 SHALL 使用对称去抖: 进入确认 3 次 (30ms @ 10ms 周期)，恢复确认 3 次 (30ms)。当前代码中 CELL_OV/CELL_UV 有 ±200mV 滞回，其余故障类型无滞回 — 统一使用去抖计数器作为唯一的抗扰机制，移除滞回不一致。
 
 ---
 
@@ -590,7 +721,7 @@ void can_pub(const bms_shared_t *bms, can_msg_t *frame);  // 生成周期上报�
 ### bms_app
 
 ```c
-void bms_app_init(void);  // 初始化全部模块 + 创建 6 个任务 + 5 个同步原语 + 1 ring_buf
+void bms_app_init(void);  // 初始化全部模块 + 创建 6 个任务 + 7 个同步原语 + 1 ring_buf
 ```
 
 ## 内存预算
@@ -605,7 +736,7 @@ void bms_app_init(void);  // 初始化全部模块 + 创建 6 个任务 + 5 个�
 | **RTOS 控制块** | | |
 | 6 × TCB (每任务 ~120B) | ~720 B | FreeRTOS + CMSIS-RTOS2 |
 | 2 × EventGroups | ~200 B | evt_protect + evt_data_ready |
-| 2 × Mutex | ~160 B | mutex_data + mutex_settings |
+| 3 × Mutex | ~240 B | mutex_iic + mutex_data + mutex_settings |
 | 1 × Semaphore | ~80 B | sem_sample |
 | **内核开销** | | |
 | FreeRTOS 定时器任务栈 (256w) + TCB | ~1200 B | configUSE_TIMERS=1 |
@@ -645,25 +776,25 @@ void bms_app_init(void);  // 初始化全部模块 + 创建 6 个任务 + 5 个�
 
 | 文件 | 操作 | 改动量 |
 |------|------|--------|
-| `Core/Inc/FreeRTOSConfig.h` | 确认 | heap=12288 (已更新) |
+| `Core/Inc/FreeRTOSConfig.h` | 确认 | heap=12288 (已确认) |
 | `Core/Src/main.c` | 修改 | 移除 USART init，适配新 bms_app_init |
 | `Core/Src/freertos.c` | 修改 | 删除 defaultTask |
-| `Core/Src/stm32f1xx_it.c` | 修改 | TIM2 ISR 添加 semaphore give |
+| `Core/Src/stm32f1xx_it.c` | 修改 | TIM2 ISR 添加 semaphore give + 故障处理器 .noinit 诊断 |
 | `CMakeLists.txt` | 修改 | 移除 usart_drv 和 data_report |
-| `BSP/Inc/ring_buf.h` † | **新增** | ~25 行 |
-| `BSP/Inc/bsp_common.h` † | **新增** | ~12 行 |
+| `BSP/Inc/ring_buf.h` † | **新增** | 元素级环形缓冲区 + put_front 头插, ~30 行 |
+| `BSP/Inc/bsp_common.h` † | **新增** | bsp_status_t 枚举, ~12 行 |
 | `BSP/Inc/led.h`, `BSP/Src/led.c` | 重写 | PA15 单 LED |
-| `BSP/Inc/io_ctrl.h`, `BSP/Src/io_ctrl.c` | 重写 | 精简为 PA8 单引脚 |
-| `BSP/Inc/bq76940.h`, `BSP/Src/bq76940.c` | 修改 | 移除 io_ctrl 依赖, API 简化 |
+| `BSP/Inc/io_ctrl.h`, `BSP/Src/io_ctrl.c` | 重写 | 精简为 PA8 单引脚 (WAKE_BQ) |
+| `BSP/Inc/bq76940.h`, `BSP/Src/bq76940.c` | 修改 | 移除 io_ctrl 依赖; 补全 OCD/SCD; 多字节读加 CRC8; 新增 FET 控制寄存器操作 |
 | `BSP/Inc/usart_drv.h`, `BSP/Src/usart_drv.c` | **删除** | — |
-| `BSP/Inc/can_drv.h`, `BSP/Src/can_drv.c` | 修改 | 采用 ring_buf |
-| `BSP/Inc/i2c_sw.h` | 修改 | 确保 PB10/PB11 时钟使能 |
+| `BSP/Inc/can_drv.h`, `BSP/Src/can_drv.c` | 修改 | 采用 ring_buf; 阻塞发送+计数信号量 |
+| `BSP/Inc/i2c_sw.h` | 修改 | 确保 PB10/PB11 GPIOB 时钟显式使能 |
 | `App/Inc/data_report.h`, `App/Src/data_report.c` | **删除** | — |
-| `App/Inc/protection.h`, `App/Src/protection.c` | 重写 | prot_result_t 签名 |
-| `App/Inc/can_cmd.h`, `App/Src/can_cmd.c` | 重写 | can_action_req_t + can_pub |
-| `App/Inc/bms_shared.h`, `App/Src/bms_shared.c` | 重写 | batteryval[] + 双 mutex |
-| `App/Inc/soc_ocv.h`, `App/Src/soc_ocv.c` | 保留 | 接口不变，修精度 bug |
-| `App/Inc/bms_app.h`, `App/Src/bms_app.c` | 重写 | 6 任务 + 新同步原语 |
+| `App/Inc/protection.h`, `App/Src/protection.c` | 重写 | prot_result_t 签名; 零 BSP 调用; 对称去抖 |
+| `App/Inc/can_cmd.h`, `App/Src/can_cmd.c` | 重写 | can_action_req_t; can_pub; can_rx_queue static |
+| `App/Inc/bms_shared.h`, `App/Src/bms_shared.c` | 重写 | batteryval[] + bms_settings_t 补全阈值字段 |
+| `App/Inc/soc_ocv.h`, `App/Src/soc_ocv.c` | 保留 | 接口不变，修 calc_correction_weight 精度 |
+| `App/Inc/bms_app.h`, `App/Src/bms_app.c` | 重写 | 6 任务 + 7 同步原语 (含 mutex_iic) + 1 ring_buf |
 | 头文件卫 (≤14 个文件) | 修改 | `__XXX_` → `XXX_` |
 
 † ring_buf 和 bsp_common 为纯头文件（inline 实现），不需要 .c 文件。
@@ -678,4 +809,4 @@ void bms_app_init(void);  // 初始化全部模块 + 创建 6 个任务 + 5 个�
 | BSP 模块 | 9 | 9（删 usart_drv, 加 ring_buf+bsp_common） |
 | App 模块 | 6 (1 死代码) | 5 (活跃) |
 | FreeRTOS 任务 | 6 | 6 (完全不同的事件驱动架构) |
-| 同步原语 | 2 | 5 (sem+2mutex+2evt+ringbuf) |
+| 同步原语 | 2 | 7 (3 mutex + 2 event + 1 semaphore + 1 ring_buf) |
