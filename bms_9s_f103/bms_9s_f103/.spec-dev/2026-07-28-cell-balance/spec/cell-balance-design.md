@@ -3,7 +3,7 @@
 spec_dev:
   version: 1
   feature: cell-balance
-  status: draft
+  status: active
   covers:
     - "App/Src/bms_app.c"
     - "App/Inc/bms_app.h"
