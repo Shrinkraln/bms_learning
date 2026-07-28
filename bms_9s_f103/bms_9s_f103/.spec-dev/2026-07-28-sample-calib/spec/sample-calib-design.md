@@ -3,7 +3,7 @@
 spec_dev:
   version: 1
   feature: sample-calib
-  status: draft
+  status: active
   covers:
     - "BSP/Inc/bq76940.h"
     - "BSP/Src/bq76940.c"
