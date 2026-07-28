@@ -22,6 +22,8 @@ spec_dev:
 
 基于 BQ76940 内部 FET 实现 9 串电芯被动均衡。均衡任务以 1s 周期运行，当最高与最低电芯压差超过 50mV 时对最高电压电芯开启均衡，压差降至 30mV 以下时停止。均衡仅在无故障（CELL_IMBALANCE 除外）时执行。
 
+> **前置依赖**: 本 spec 假定 `bms-fullstack-redesign`（`.spec-dev/2026-07-26-bms-fullstack-redesign/`）中的 6 任务事件驱动架构、同步原语（`mutex_iic`、`mutex_data`、`evt_data_ready`）及 `ALL_FAULTS` 宏均已实现。实施计划需将 fullstack-redesign 排在 cell-balance 之前。
+
 **成功标准**：
 - 电芯压差维护在 30mV 以内（均衡停止阈值）
 - 故障条件下自动停止均衡，故障清除后自动恢复
@@ -53,7 +55,7 @@ spec_dev:
 | `bq76940.c` | `set_balancing`/`get_balancing` 新增 CELLBAL3 读写；`read_cells` 重构为逐通道读取 9 个在用 VC | ~80 行 |
 | `bms_shared.h/c` | `bms_settings_t` 移除 `balance_thresh_mv` / `balance_min_mv` 字段及默认值 | ~10 行 |
 | `protection.h` | CELL_IMBALANCE 从均衡屏蔽故障掩码排除（详见 [ADR-0007](../../adr/0007-cell-balance-fault-imbalance-exclusion.md)） | 0 行（仅宏定义在 bms_app.h） |
-| `can_cmd.c` | 移除 `balance_thresh_mv` / `balance_min_mv` 的 CAN 配置命令（0x05/0x06） | ~8 行 |
+| `can_cmd.c` | 移除 `balance_thresh_mv` / `balance_min_mv` 的 CAN 配置命令（0x05/0x06）；`BALANCE_SET`/`BALANCE_OFF` 加 `mutex_iic` 保护 | ~12 行 |
 
 ## 已确认的关键决策
 
@@ -92,7 +94,7 @@ spec_dev:
 
 ### Requirement: task_balance SHALL 以栈快照方式读取电芯数据
 
-task_balance SHALL 通过 `osMutexAcquire(mutex_data, 10ms)` 获取数据锁，将 `cells_mv[9]` 和 `active_faults` 拷贝到栈上局部变量，然后立即释放锁。后续均衡判断 SHALL 全部基于栈快照。
+task_balance SHALL 通过 `osMutexAcquire(mutex_data, 10ms)` 获取数据锁，将 `cells_mv[9]`（路径 `bms->bq_data.cells.cell_mv[]`）和 `active_faults`（路径 `bms->prot_ctx.active_faults`，由 `protection_task` 写入）拷贝到栈上局部变量，然后立即释放锁。后续均衡判断 SHALL 全部基于栈快照。
 
 #### Scenario: 正常获取快照
 
@@ -148,6 +150,12 @@ task_balance SHALL 通过 `osMutexAcquire(mutex_data, 10ms)` 获取数据锁，�
 - **GIVEN** cells_mv diff = 520mV > 500mV → 触发 FAULT_CELL_IMBALANCE，active_faults = FAULT_CELL_IMBALANCE
 - **WHEN** task_balance 检查 `(active_faults & FAULT_MASK_BLOCK_BALANCE)`
 - **THEN** `FAULT_CELL_IMBALANCE` 被排除 → 结果为 0 → 继续均衡（均衡是压差过大的修复手段）
+
+#### Scenario: 故障清除后自动恢复均衡
+
+- **GIVEN** 上一轮 CELL_OV 故障阻止了均衡（mask=0），本轮 active_faults=0（故障已恢复），diff=80mV > 50mV
+- **WHEN** task_balance 执行均衡判断
+- **THEN** `(active_faults & FAULT_MASK_BLOCK_BALANCE) == 0` → 均衡恢复 → mask 设置为最高电芯对应位
 
 ### Requirement: 均衡任务 SHALL 通过 I2C 写 CELLBAL 寄存器控制均衡开关
 
@@ -216,6 +224,32 @@ task_balance SHALL 在 `balance_mask` 发生变化时，通过 `osMutexAcquire(m
 - **GIVEN** BQ76940 I2C 地址 0x08（7-bit）
 - **WHEN** `bq76940_set_balancing(0x0001)` 调用 `i2c_sw_write_crc(0x08, 0x01, 0x01)`
 - **THEN** 数据写入地址 0x01（CELLBAL1），而非 0x06（原 PROTECT1 地址）
+
+### MODIFIED: bq76940_read_cells 重构后 SHALL 保留所有既有计算字段
+
+`bq76940_read_cells()` 在改为逐通道读取 9 个在用 VC 后，SHALL 仍然计算并填充 `cells.max_mv`、`cells.min_mv`、`cells.total_mv`、`cells.diff_mv` 和 `cells.valid` 字段。这些字段被 `protection_check()` 和 CAN 上报函数依赖。
+
+#### Scenario: 重构后 max_mv/min_mv/diff_mv 正确
+
+- **GIVEN** 9 个电芯分别读取到电压 {3600, 3520, 3540, 3550, 3560, 3530, 3540, 3510, 3500}
+- **WHEN** `bq76940_read_cells(&cells)` 完成
+- **THEN** `cells.max_mv=3600`, `cells.min_mv=3500`, `cells.diff_mv=100`, `cells.total_mv` 为 9 通道电压之和, `cells.valid=1`
+
+### MODIFIED: CAN BALANCE_SET/BALANCE_OFF SHALL 获取 mutex_iic
+
+`can_cmd.c` 中 `CAN_CTRL_BALANCE_SET` (0x30) 和 `CAN_CTRL_BALANCE_OFF` (0x31) 的处理 SHALL 在调用 `bq76940_set_balancing()` / `bq76940_balance_off()` 前获取 `mutex_iic`（超时 10ms），调用后释放。防止与 task_balance 的 I2C 写产生竞态。
+
+#### Scenario: CAN BALANCE_SET 与 task_balance 不冲突
+
+- **GIVEN** task_balance 持有 mutex_iic 正在写 CELLBAL 寄存器
+- **WHEN** CAN RX 任务收到 BALANCE_SET 命令并尝试 `osMutexAcquire(mutex_iic, 10ms)`
+- **THEN** CAN RX 在 mutex_iic 上阻塞，直到 task_balance 释放锁后才写入
+
+#### Scenario: CAN BALANCE_OFF 正常获取锁
+
+- **GIVEN** mutex_iic 未被持有
+- **WHEN** CAN RX 任务收到 BALANCE_OFF 命令
+- **THEN** 获取 mutex_iic → `bq76940_balance_off()` → 释放 mutex_iic。task_balance 下一轮（1s 内）将用自主判断覆盖此设置
 
 ## REMOVED Requirements
 
@@ -286,6 +320,13 @@ task_balance (prio osPriorityBelowNormal, 1000ms)
 
 ```c
 #define BALANCE_PERIOD_MS           1000U  // 均衡任务周期
+
+// ALL_FAULTS: 全部 12 种故障位掩码（定义于 fullstack-redesign spec，此处复述供引用）
+// = FAULT_CELL_OV | FAULT_CELL_UV | FAULT_PACK_OV | FAULT_PACK_UV
+//   | FAULT_DISCHARGE_OC | FAULT_CHARGE_OC | FAULT_SHORT_CIRCUIT
+//   | FAULT_OVER_TEMP | FAULT_UNDER_TEMP | FAULT_CELL_IMBALANCE
+//   | FAULT_COMM_LOSS | FAULT_WATCHDOG
+// = 0x0FFFU (不含 COMM_LOSS 则为 0x0BFFU，取决于 comm-loss spec 实现状态)
 
 // 均衡屏蔽故障掩码：所有故障中排除 CELL_IMBALANCE
 // (均衡是压差过大的修复手段，CELL_IMBALANCE 不应阻止均衡)
@@ -371,6 +412,7 @@ bq76940_status_t bq76940_set_balancing(uint16_t balance_mask)
 | CELL_OV 故障 → 不均衡 | unit | 任务内 TDD | active_faults 含 FAULT_CELL_OV → mask=0 |
 | CELL_IMBALANCE 故障 → 仍均衡 | unit | 任务内 TDD | active_faults 仅 CELL_IMBALANCE → mask != 0 |
 | 最高并列 → 选低索引 | unit | 任务内 TDD | 两个相同 max → 选 idx 更小者 |
+| 故障清除后自动恢复均衡 | unit | 任务内 TDD | 上一轮 CELL_OV 阻止均衡，本轮 active_faults=0 → 均衡恢复 |
 | I2C 写 CELLBAL3 | integration | 任务内 TDD | mask 含 bit[14:10] → i2c_sw_write_crc 调用到 0x03 |
 | bq76940_get_balancing 回读 CELLBAL3 | integration | 任务内 TDD | 写后回读 mask 一致 |
 | read_cells 仅读 9 个在用通道 | integration | 任务内 TDD | cells_mv[0..8] = VC1/2/5/6/7/10/11/12/15 电压 |
@@ -383,8 +425,8 @@ bq76940_status_t bq76940_set_balancing(uint16_t balance_mask)
 | 单电芯均衡收敛极慢（5mA 被动均衡） | 此乃被动均衡固有特性。均衡是维护性功能（维持已平衡状态），50mV 启动阈值保证仅在需要时介入 |
 | DEVICE_XREADY 清除 CELLBAL 后 1s 真空 | 1s 对均衡效果影响可忽略（均衡是持续数分钟至数小时的过程） |
 | task_balance 持 mutex_iic 阻塞 task_protect | balance 优先级 BelowNormal 且持锁 < 1ms（仅 I2C 写 3 字节），不会显著阻塞 |
-| 未注册的 VC 通道（VC3/4/8/9/13/14）读到噪声 | 直接跳过不读，不在 cells_mv 中出现 |
-| I2C 频繁超时导致均衡无法执行 | 通信恢复后自动恢复均衡；COMM_LOSS 故障阻止均衡（保护通信丢失时的确定性行为） |
+| 短路 VC 通道（VC3/4/8/9/13/14）噪声 | 重构为逐通道读取后，短路线路通道不再被 I2C 访问，不从 BQ76940 读取数据 |
+| I2C 频繁超时导致均衡无法执行 | 通信恢复后自动恢复均衡。COMM_LOSS 不阻止均衡——若 I2C 已断，`bq76940_set_balancing()` 自然失败；I2C 恢复后均衡应立刻恢复 |
 
 ## 开放问题
 
