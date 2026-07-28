@@ -42,7 +42,7 @@ spec_dev:
 | Q_passed | 一次充放周期内累计通过的电量 (mAh) | 累计电量、积分电量 |
 | SOC 显示值 | 映射到 [0,1000] 的用户可见 SOC，底部 3% 隐藏 | display_soc、用户 SOC |
 | SOC 真实值 | 安时积分直接计算的 SOC (0-1000)，未经映射 | real_soc、实际 SOC |
-| IDLE 基准电压 | 进入 IDLE 态时记录的最低电芯电压，用于充电检测 | baseline、参考电压 |
+| IDLE 基准电压 | POLARIZATION→IDLE 转换时记录的最低电芯电压，用于充电检测。仅在状态转换时设置一次，不在 IDLE 循环中更新 | baseline、参考电压 |
 
 ## 影响面
 
@@ -75,8 +75,12 @@ spec_dev:
 | IDLE | DISCHARGE | `current_ma < -500mA` |
 | IDLE | CHARGE | `cell_min > idle_baseline + 100mV` 且放电条件不满足 |
 | DISCHARGE | POLARIZATION | `\|current_ma\| < 300mA` 或 `cell_min < 3000mV` |
+| DISCHARGE | CHARGE | `current_ma > +200mA` 持续 10 秒 (充电器接入) |
 | CHARGE | POLARIZATION | 过去 5 分钟内 `max(cell_min) - min(cell_min) < 5mV` (电压平台) |
-| POLARIZATION | IDLE | 极化计时器 ≥ 30 分钟 |
+| CHARGE | DISCHARGE | `current_ma < -500mA` (负载接入) |
+| POLARIZATION | DISCHARGE | `current_ma < -500mA` (中断极化) |
+| POLARIZATION | CHARGE | `cell_min > 进入极化时的电压 + 100mV` (中断极化) |
+| POLARIZATION | IDLE | 极化计时器 ≥ 30 分钟且无充/放条件 |
 
 #### Scenario: 上电后进入 IDLE
 
@@ -118,11 +122,23 @@ spec_dev:
 
 - **GIVEN** state = POLARIZATION, 极化计时器 = 30 分钟
 - **WHEN** 状态机检查
-- **THEN** state → IDLE, 用 `cell_min` OCV 查表更新 `soc_real` 和 `remaining_mah`, 记录新 `idle_baseline`, 触发 Q_max 学习检查
+- **THEN** state → IDLE, 用 `cell_min` OCV 查表更新 `soc_real` 和 `remaining_mah`, 设置 `idle_baseline = cell_min`, 触发 Q_max 学习检查
+
+#### Scenario: 极化中被强放电打断 → DISCHARGE
+
+- **GIVEN** state = POLARIZATION, 极化计时器 = 5 分钟, `current_ma = -800mA`
+- **WHEN** 状态机检查转换条件 (中断优先于计时)
+- **THEN** state → DISCHARGE（放弃本次 OCV 修正，优先跟踪放电）
+
+#### Scenario: DISCHARGE 中充电器接入 → CHARGE
+
+- **GIVEN** state = DISCHARGE, `current_ma = +3000mA` 持续 10 秒
+- **WHEN** 状态机检测到正电流 > +200mA 达 10 秒
+- **THEN** state → CHARGE, `soc_at_entry = soc_real`, `q_passed = 0`
 
 ### Requirement: 充放电状态 SHALL 执行安时积分
 
-DISCHARGE 和 CHARGE 状态下，`soc_ocv_update()` SHALL 每周期（~1s）执行安时积分：`q_passed += |I| × dt / 3600000`（mAh），`remaining_mah += I × dt / 3600000`（充电为正、放电为负），`soc_real = remaining_mah × 1000 / q_max`。
+DISCHARGE 和 CHARGE 状态下，`soc_ocv_update()` SHALL 每周期（~1s）执行安时积分。中间量 SHALL 使用 `int64_t` 避免 <3600mA 时整数截断为 0（与现有 `soc_ocv.c:269` 一致）：`delta_mah = (int64_t)I × (int64_t)dt_ms / 3600000L`。`q_passed += \|delta_mah\|`，`remaining_mah += delta_mah`（充电为正、放电为负），`soc_real = remaining_mah × 1000 / q_max`。
 
 #### Scenario: 放电积分
 
@@ -138,7 +154,7 @@ DISCHARGE 和 CHARGE 状态下，`soc_ocv_update()` SHALL 每周期（~1s）执�
 
 ### Requirement: Q_max SHALL 在深度放电后通过 EMA 自学习
 
-系统 SHALL 在 POLARIZATION → IDLE 转换时检查 Q_max 学习条件：若 `q_passed > q_max / 2`（放电量超过当前 Q_max 一半），则计算 `Q_new = q_passed × 1000 / (soc_at_entry − last_soc_end)`，然后 EMA 更新 `q_max += (Q_new − q_max) / 10`。
+系统 SHALL 仅在 DISCHARGE→POLARIZATION→IDLE 完整周期（即 `soc_at_entry > last_soc_end`，SOC 下降）且 `q_passed > q_max / 2`（放电量超过当前 Q_max 一半）时触发 Q_max 学习。学习公式：`Q_new = q_passed × 1000 / (soc_at_entry − last_soc_end)`。SHALL 先检查分母 > 0 再执行除法（防止除零 HardFault）。更新公式：`q_max += (Q_new − q_max) / 10`。充电周期不触发 Q_max 学习（`soc_at_entry < last_soc_end` → 分母为负，跳过）。
 
 #### Scenario: 有效深度放电 → Q_max 更新
 
@@ -285,34 +301,54 @@ soc_ocv_update(cell_min, current, dt_ms)  [1s 周期]
       → CHARGE,    soc_at_entry = soc_real, q_passed = 0
     elif |current| < 200mA:
       soc_real = soc_ocv_lookup(cell_min)  // OCV 静置更新
-      remaining_mah = q_max * soc_real / 1000
-    idle_baseline = cell_min  // 持续更新基准
+      remaining_mah = q_max * (int64_t)soc_real / 1000L
+    // idle_baseline 不在此更新——仅在 POLARIZATION→IDLE 时设置
 
   case DISCHARGE:
-    q_passed      += |current| * dt / 3600000
-    remaining_mah += current * dt / 3600000
-    soc_real       = remaining_mah * 1000 / q_max
-    if |current| < 300mA || cell_min < 3000mV:
+    delta_mah = (int64_t)current * (int64_t)dt_ms / 3600000L  // 使用 int64_t
+    q_passed      += (delta_mah < 0) ? (-delta_mah) : delta_mah  // |delta|
+    remaining_mah += delta_mah
+    soc_real       = (uint16_t)(remaining_mah * 1000L / q_max)
+    // 交叉检测: 充电器突然接入
+    if current > +200mA 持续 10 秒:
+      → CHARGE, soc_at_entry = soc_real, q_passed = 0
+    elif |current| < 300mA || cell_min < 3000mV:
       → POLARIZATION, 记录 last_soc_end, last_q_passed, 计时器=0
+      from_discharge = true  // 标记为放电周期 (仅放电可触发 Q_max 学习)
 
   case CHARGE:
-    q_passed      += |current| * dt / 3600000
-    remaining_mah += current * dt / 3600000
-    soc_real       = remaining_mah * 1000 / q_max
-    if 5min_内_Δcell_min < 5mV:
+    delta_mah = (int64_t)current * (int64_t)dt_ms / 3600000L
+    q_passed      += (delta_mah < 0) ? (-delta_mah) : delta_mah
+    remaining_mah += delta_mah
+    soc_real       = (uint16_t)(remaining_mah * 1000L / q_max)
+    // 充电平台检测: 5min 滑动窗口, Δcell_min < 5mV
+    更新 charge_peak_mv / charge_valley_mv (5min 窗口)
+    // 交叉检测: 负载突然接入
+    if current < -500mA:
+      → DISCHARGE, soc_at_entry = soc_real, q_passed = 0
+    elif 窗口满 5min 且 (charge_peak_mv - charge_valley_mv) < 5mV:
       → POLARIZATION, 记录 last_soc_end, last_q_passed, 计时器=0
+      from_discharge = false  // 充电周期, 不触发 Q_max 学习
 
   case POLARIZATION:
-    polarization_ms += dt_ms
-    if polarization_ms >= 30min:
-      // OCV 修正
-      soc_real = soc_ocv_lookup(cell_min)
-      remaining_mah = q_max * soc_real / 1000
-      // Q_max 学习
-      if last_q_passed > q_max / 2:
-        Q_new = last_q_passed * 1000 / (soc_at_entry - last_soc_end)
-        q_max += (Q_new - q_max) / 10
-      → IDLE, idle_baseline = cell_min
+    // 优先检查充/放中断条件 (避免 30min 盲区)
+    if current < -500mA:
+      → DISCHARGE, soc_at_entry = soc_real, q_passed = 0
+    elif cell_min > pol_entry_mv + 100mV:  // pol_entry_mv = 进入极化时的电压
+      → CHARGE, soc_at_entry = soc_real, q_passed = 0
+    else:
+      polarization_ms += dt_ms
+      if polarization_ms >= 30min:
+        // OCV 修正
+        soc_real = soc_ocv_lookup(cell_min)
+        remaining_mah = q_max * (int64_t)soc_real / 1000L
+        // Q_max 学习 (仅放电周期, 除零保护)
+        if from_discharge && last_q_passed > q_max / 2:
+          uint16_t delta_soc = soc_at_entry - last_soc_end
+          if delta_soc > 0:
+            int32_t Q_new = last_q_passed * 1000L / (int32_t)delta_soc
+            q_max += (Q_new - q_max) / 10
+        → IDLE, idle_baseline = cell_min  // 仅在此时更新基准
 ```
 
 ### 关键接口
@@ -340,18 +376,20 @@ typedef struct {
 
     /* 状态机 */
     soc_state_t  state;
-    uint16_t     idle_baseline_mv;
-    uint16_t     soc_at_entry;      // 进入充/放时的 SOC
+    uint16_t     idle_baseline_mv;   // IDLE 基准电压 (仅 POL→IDLE 时更新)
+    uint16_t     pol_entry_mv;       // 进入 POLARIZATION 时的电压
+    uint16_t     soc_at_entry;       // 进入充/放时的 SOC
     uint32_t     polarization_ms;
+    uint8_t      from_discharge;     // 0=充电周期, 1=放电周期 (Q_max 学习门控)
 
     /* Q_max 学习历史 */
-    uint16_t     last_soc_start;
     uint16_t     last_soc_end;
     int32_t      last_q_passed;
 
-    /* 充电平台检测 */
-    uint16_t     charge_peak_mv;    // 5min 窗口内最高电压
-    uint32_t     charge_peak_ms;    // 窗口起始时间
+    /* 充电平台检测 (5min 滑动窗口) */
+    uint16_t     charge_peak_mv;     // 窗口内最高电压
+    uint16_t     charge_valley_mv;   // 窗口内最低电压
+    uint32_t     charge_window_ms;   // 窗口累计时间
 
     uint8_t      initialized;
 } soc_ctx_t;
@@ -373,7 +411,11 @@ const soc_ctx_t *soc_ocv_get_ctx(void);
 #define SOC_DISPLAY_OFFSET      30    // 底部隐藏 3%
 #define SOC_DISPLAY_SCALE       970   // 映射分母
 #define Q_MAX_EMA_DIVISOR       10    // EMA 除数 (α=0.1)
-#define POLARIZATION_TIME_MS    1800000UL  // 30 分钟
+#define POLARIZATION_TIME_MS       1800000UL  // 30 分钟
+#define CHARGE_PLATEAU_DELTA_MV          5U   // 充电平台 ΔV 阈值 (mV)
+#define CHARGE_PLATEAU_WINDOW_MS     300000UL  // 充电平台检测窗口 (5 分钟)
+#define CHARGE_DETECT_CURRENT_MA        200    // 充电器接入检测电流 (mA)
+#define CHARGE_DETECT_DEBOUNCE_S         10U   // 充电器接入去抖时间 (秒)
 ```
 
 ### 错误处理
