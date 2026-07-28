@@ -3,7 +3,7 @@
 spec_dev:
   version: 1
   feature: soc-fsm
-  status: draft
+  status: active
   covers:
     - "App/Inc/soc_ocv.h"
     - "App/Src/soc_ocv.c"
