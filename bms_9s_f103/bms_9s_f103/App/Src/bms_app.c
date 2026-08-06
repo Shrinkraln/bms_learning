@@ -246,20 +246,25 @@ static void task_protect_entry(void *arg)
         g_fet_dsg_on = (ctrl2_val & BQ76940_SYS_CTRL2_DSG_FET) ? 1U : 0U;
         osMutexRelease(mutex_iic);
 
-        /* ⑤ 生成故障 CAN 帧 (big-endian) */
+        /* ⑤ 生成故障 CAN 帧 (新 layout: uint16 电压, 无电流) */
         fault_frame.id  = CAN_TX_BMS_FAULT;
         fault_frame.len = 8U;
         fault_frame.data[0] = (uint8_t)level;
         fault_frame.data[1] = (uint8_t)((faults >> 8U) & 0xFFU);
         fault_frame.data[2] = (uint8_t)(faults & 0xFFU);
-        fault_frame.data[3] = (uint8_t)((bms->battery_val.cells.max_mv / 10U) & 0xFFU);
-        fault_frame.data[4] = (uint8_t)((bms->battery_val.cells.min_mv / 10U) & 0xFFU);
+        /* max_cell_mV — uint16 big-endian */
         {
-            int16_t i_scaled = (int16_t)(bms->battery_val.current.current_ma / 10L);
-            fault_frame.data[5] = (uint8_t)(((uint16_t)i_scaled >> 8U) & 0xFFU);
-            fault_frame.data[6] = (uint8_t)((uint16_t)i_scaled & 0xFFU);
+            uint16_t max_mv = bms->battery_val.cells.max_mv;
+            fault_frame.data[3] = (uint8_t)((max_mv >> 8U) & 0xFFU);
+            fault_frame.data[4] = (uint8_t)(max_mv & 0xFFU);
         }
-        /* max_temp + 40°C offset */
+        /* min_cell_mV — uint16 big-endian */
+        {
+            uint16_t min_mv = bms->battery_val.cells.min_mv;
+            fault_frame.data[5] = (uint8_t)((min_mv >> 8U) & 0xFFU);
+            fault_frame.data[6] = (uint8_t)(min_mv & 0xFFU);
+        }
+        /* max_temp + 40°C offset (1°C resolution) */
         {
             int16_t max_temp = bms->battery_val.temps.ts_mdeg_c[0];
             for (uint8_t i = 1U; i < BQ76940_TS_COUNT; i++) {
