@@ -30,8 +30,9 @@ void BmsDataModel::onConnectionChanged(bool connected)
         m_connStatus = connected ? CONNECTED : DISCONNECTED;
     }
     emit connectionStatusChanged();
-    emit statusTextChanged(m_connStatus == CONNECTED ? "● 已连接"
-        : m_connStatus == SHUTDOWN ? "⏻ BMS 已关机" : "⚠ 已断开");
+    m_statusText = m_connStatus == CONNECTED ? "● 已连接"
+        : m_connStatus == SHUTDOWN ? "⏻ BMS 已关机" : "⚠ 已断开";
+    emit statusTextChanged(m_statusText);
 }
 
 void BmsDataModel::applySnapshot(const BmsSnapshot &snap)
@@ -76,12 +77,19 @@ void BmsDataModel::applySnapshot(const BmsSnapshot &snap)
     for (int i = 0; i < 3; ++i) {
         m_tempModel.updateTemp(i, snap.temp_0p1c[i]);
     }
+    // 3 路 NTC 平均温度 (°C) — 曲线页等标量场景使用
+    qreal avg = (snap.temp_0p1c[0] + snap.temp_0p1c[1] + snap.temp_0p1c[2]) / 3.0 / 10.0;
+    if (m_avgTempC != avg) {
+        m_avgTempC = avg;
+        emit avgTempCChanged();
+    }
 
     // CSV
     if (m_csvLogger) { m_csvLogger->appendRow(snap); }
 
     // 时间戳
-    emit lastUpdateChanged(snap.timestamp.toString("HH:mm:ss"));
+    m_lastUpdate = snap.timestamp.toString("HH:mm:ss");
+    emit lastUpdateChanged(m_lastUpdate);
 }
 
 void BmsDataModel::sendQuery(quint8 subCmd)
