@@ -1,11 +1,30 @@
-#pragma once
+#ifndef FAULT_LIST_MODEL_H
+#define FAULT_LIST_MODEL_H
 
-#include <QObject>
+#include <QAbstractListModel>
+#include <QVector>
 
-// 故障列表模型 (占位) — 后续任务实现
-class FaultListModel : public QObject
-{
+struct FaultEntry {
+    int bit;
+    QString name;
+    QString severity; // "WARNING", "ALERT", "FAULT"
+};
+
+class FaultListModel : public QAbstractListModel {
     Q_OBJECT
 public:
+    enum Roles { FaultNameRole = Qt::UserRole + 1, FaultBitRole, SeverityRole };
+    Q_ENUM(Roles)
+
     explicit FaultListModel(QObject *parent = nullptr);
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+    QVariant data(const QModelIndex &index, int role) const override;
+    QHash<int, QByteArray> roleNames() const override;
+
+    void setFaults(quint16 activeBits);
+
+private:
+    QVector<FaultEntry> m_active;
 };
+
+#endif
