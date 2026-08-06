@@ -42,6 +42,11 @@ static uint16_t last_active_faults = 0x0000U;
 /* 通信错误计数 */
 static uint8_t comm_err_cnt = 0U;
 
+/* FET 与均衡状态 (供 can_pub 读取) */
+uint8_t g_fet_chg_on       = 1U;
+uint8_t g_fet_dsg_on       = 1U;
+uint8_t g_balancing_active = 0U;
+
 /* ============================================================
  * 任务函数前向声明
  * ============================================================ */
@@ -236,6 +241,9 @@ static void task_protect_entry(void *arg)
         }
 
         bq76940_write_sys_ctrl2(ctrl2_mask, ctrl2_val);
+        /* 同步 FET 状态到全局 (供 can_pub 的 0x120 ctrl 字节读取) */
+        g_fet_chg_on = (ctrl2_val & BQ76940_SYS_CTRL2_CHG_FET) ? 1U : 0U;
+        g_fet_dsg_on = (ctrl2_val & BQ76940_SYS_CTRL2_DSG_FET) ? 1U : 0U;
         osMutexRelease(mutex_iic);
 
         /* ⑤ 生成故障 CAN 帧 (big-endian) */
@@ -305,26 +313,32 @@ static void task_can_rx_entry(void *arg)
             case CAN_ACTION_FET_CHG_ON:
                 bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_FET,
                                          BQ76940_SYS_CTRL2_CHG_FET);
+                g_fet_chg_on = 1U;
                 break;
             case CAN_ACTION_FET_CHG_OFF:
                 bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_FET, 0U);
+                g_fet_chg_on = 0U;
                 break;
             case CAN_ACTION_FET_DSG_ON:
                 bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_FET,
                                          BQ76940_SYS_CTRL2_DSG_FET);
+                g_fet_dsg_on = 1U;
                 break;
             case CAN_ACTION_FET_DSG_OFF:
                 bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_FET, 0U);
+                g_fet_dsg_on = 0U;
                 break;
             case CAN_ACTION_BALANCE_SET:
                 osMutexAcquire(mutex_iic, osWaitForever);
                 bq76940_set_balancing(req.balance_mask);
                 osMutexRelease(mutex_iic);
+                g_balancing_active = (req.balance_mask != 0U) ? 1U : 0U;
                 break;
             case CAN_ACTION_BALANCE_OFF:
                 osMutexAcquire(mutex_iic, osWaitForever);
                 bq76940_balance_off();
                 osMutexRelease(mutex_iic);
+                g_balancing_active = 0U;
                 break;
             case CAN_ACTION_SHUTDOWN:
                 bq76940_shutdown();
@@ -372,6 +386,7 @@ static void task_balance_entry(void *arg)
                 osMutexAcquire(mutex_iic, osWaitForever);
                 bq76940_set_balancing(mask);
                 osMutexRelease(mutex_iic);
+                g_balancing_active = (mask != 0U) ? 1U : 0U;
             } else if (cells->diff_mv <= (thresh_mv / 2U)) {
                 /* 压差已缩小: 关闭均衡 */
                 bms_shared_data_unlock();
@@ -379,6 +394,7 @@ static void task_balance_entry(void *arg)
                 osMutexAcquire(mutex_iic, osWaitForever);
                 bq76940_balance_off();
                 osMutexRelease(mutex_iic);
+                g_balancing_active = 0U;
             } else {
                 bms_shared_data_unlock();
             }
@@ -443,7 +459,7 @@ static void task_can_tx_entry(void *arg)
         /* 快照拷贝共享数据 */
         bms_shared_t *bms = bms_shared_data_lock(10U);
         if (bms != NULL) {
-            can_msg_t frames[4];
+            can_msg_t frames[5];
             uint8_t count = can_pub(bms, frames);
 
             /* 周期帧尾插入队列 (持 mutex_can_tx 保护) */

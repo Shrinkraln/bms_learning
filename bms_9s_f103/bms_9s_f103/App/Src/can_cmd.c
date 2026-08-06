@@ -286,7 +286,18 @@ uint8_t can_pub(const bms_shared_t *bms, can_msg_t *frames)
     frames[2].data[2] = (uint8_t)(pack_mv & 0xFFU);
     frames[2].data[3] = (uint8_t)(((uint16_t)current_scaled >> 8U) & 0xFFU);
     frames[2].data[4] = (uint8_t)((uint16_t)current_scaled & 0xFFU);
-    frames[2].data[5] = (uint8_t)bms->prot_level;
+    /* ctrl byte: [1:0]=prot_level, [2]=CHG_FET, [3]=DSG_FET, [4]=BALANCING */
+    {
+        uint8_t ctrl = (uint8_t)(bms->prot_level & 0x03U);
+        /* FET/均衡状态从全局读取 (task_protect/bms_app 维护) */
+        extern uint8_t g_fet_chg_on;    /* 定义在 bms_app.c */
+        extern uint8_t g_fet_dsg_on;
+        extern uint8_t g_balancing_active;
+        if (g_fet_chg_on)  { ctrl |= (1U << 2U); }
+        if (g_fet_dsg_on)  { ctrl |= (1U << 3U); }
+        if (g_balancing_active) { ctrl |= (1U << 4U); }
+        frames[2].data[5] = ctrl;
+    }
     /* Cell 9 (index 8) in spare bytes, big-endian */
     frames[2].data[6] = (uint8_t)((cells->cell_mv[8] >> 8U) & 0xFFU);
     frames[2].data[7] = (uint8_t)(cells->cell_mv[8] & 0xFFU);
@@ -308,5 +319,19 @@ uint8_t can_pub(const bms_shared_t *bms, can_msg_t *frames)
     frames[3].data[6] = (uint8_t)(((uint32_t)q_max_scaled >> 8U) & 0xFFU);
     frames[3].data[7] = (uint8_t)((uint32_t)q_max_scaled & 0xFFU);
 
-    return 4U;
+    /* ---- Frame 4: 0x121 TEMPERATURE (8 bytes, big-endian int16 ×3 + pad) ---- */
+    frames[4].id  = CAN_TX_TEMPERATURE;
+    frames[4].len = 8U;
+    {
+        const bq76940_temp_data_t *temps = &bms->battery_val.temps;
+        for (uint8_t i = 0U; i < 3U; i++) {
+            int16_t t = temps->ts_mdeg_c[i];
+            frames[4].data[i * 2U]     = (uint8_t)(((uint16_t)t >> 8U) & 0xFFU);
+            frames[4].data[i * 2U + 1U] = (uint8_t)((uint16_t)t & 0xFFU);
+        }
+        frames[4].data[6] = 0x00U;
+        frames[4].data[7] = 0x00U;
+    }
+
+    return 5U;
 }

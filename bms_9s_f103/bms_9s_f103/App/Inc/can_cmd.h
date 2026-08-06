@@ -23,6 +23,7 @@ extern "C" {
 #define CAN_TX_CELL_VOLT_1_4  0x110U
 #define CAN_TX_CELL_VOLT_5_9  0x111U
 #define CAN_TX_STATUS          0x120U
+#define CAN_TX_TEMPERATURE    0x121U
 #define CAN_TX_SOC_OCV        0x130U
 
 #define CAN_RX_QUERY          0x200U
@@ -82,7 +83,7 @@ can_action_req_t can_cmd_dispatch(const can_msg_t *msg, uint16_t active_faults,
 /**
  * @brief  生成周期性 CAN 上报帧
  * @param  bms    共享数据快照
- * @param  frames 输出帧数组 (至少 4 帧空间)
+ * @param  frames 输出帧数组 (至少 5 帧空间)
  * @return 生成的帧数
  */
 uint8_t can_pub(const bms_shared_t *bms, can_msg_t *frames);
