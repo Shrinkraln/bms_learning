@@ -4,6 +4,10 @@
 #include <QSettings>
 #include <QTranslator>
 #include <QLocale>
+#include <QThread>
+#include "can/CanWorker.h"
+#include "model/BmsDataModel.h"
+#include "protocol/CsvLogger.h"
 
 int main(int argc, char *argv[])
 {
@@ -20,9 +24,31 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine;
 
-    // Model 将在后续任务中创建并注册到 context
-    // BmsDataModel model;
-    // engine.rootContext()->setContextProperty("bms", &model);
+    // 队列连接 (CanWorker 跨线程) 需要注册自定义 metatype — 必须在线程装配之前
+    qRegisterMetaType<CanFrame>("CanFrame");
+    qRegisterMetaType<QVector<CanFrame>>("QVector<CanFrame>");
+
+    CanWorker canWorker;
+    BmsDataModel bmsModel;
+    CsvLogger csvLogger;
+
+    bmsModel.setCanWorker(&canWorker);
+    bmsModel.setCsvLogger(&csvLogger);
+
+    QObject::connect(&canWorker, &CanWorker::batchReady,
+                     &bmsModel, &BmsDataModel::onBatchReady);
+    QObject::connect(&canWorker, &CanWorker::connectionStatusChanged,
+                     &bmsModel, &BmsDataModel::onConnectionChanged);
+
+    engine.rootContext()->setContextProperty("bms", &bmsModel);
+
+    // CanWorker 线程
+    QThread *canThread = new QThread(&app);
+    canWorker.moveToThread(canThread);
+    QObject::connect(canThread, &QThread::started, &canWorker, [&]() {
+        canWorker.start("peakcan", "usb0", 500000);
+    });
+    canThread->start();
 
     const QUrl url("qrc:/qt/qml/com/bms/host/qml/main.qml");
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreated,

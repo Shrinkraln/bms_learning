@@ -9,14 +9,6 @@ ApplicationWindow {
     visible: true
     title: "BMS 9S 上位机"
 
-    Component.onCompleted: {
-        // 恢复窗口几何
-        var geo = settings.value("ui/windowGeometry", "")
-        if (geo !== "") {
-            // QML 侧暂不恢复几何 (C++ 侧设置)
-        }
-    }
-
     // 状态栏
     footer: Rectangle {
         height: 24
