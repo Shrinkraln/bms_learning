@@ -6,8 +6,8 @@
  *          - 所有超时计算使用差值法，避免翻转问题
  */
 
-#ifndef __BSP_SYSTICK_H
-#define __BSP_SYSTICK_H
+#ifndef BSP_SYSTICK_H
+#define BSP_SYSTICK_H
 
 #include "stm32f1xx_hal.h"
 
@@ -76,4 +76,4 @@ uint8_t bsp_tick_is_timeout(uint32_t start_tick, uint32_t timeout_ms);
 }
 #endif
 
-#endif /* __BSP_SYSTICK_H */
+#endif /* BSP_SYSTICK_H */

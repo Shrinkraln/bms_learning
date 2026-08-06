@@ -7,8 +7,8 @@
  *          - TIM2 挂载在 APB1 (36MHz)，16 位计数器
  */
 
-#ifndef __BSP_TIMER_H
-#define __BSP_TIMER_H
+#ifndef BSP_TIMER_H
+#define BSP_TIMER_H
 
 #include "stm32f1xx_hal.h"
 #include "main.h"
@@ -97,4 +97,4 @@ void bsp_timer_irq_handler(TIM_HandleTypeDef *htim);
 }
 #endif
 
-#endif /* __BSP_TIMER_H */
+#endif /* BSP_TIMER_H */

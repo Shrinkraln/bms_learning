@@ -114,11 +114,9 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* defaultTask 仅作为 idle 存在 — BMS 任务由 bms_app_init() 创建 */
-  for(;;)
-  {
-    osDelay(1000);
-  }
+  /* defaultTask 已移除 — BMS 任务由 bms_app_init() 创建 */
+  (void)argument;
+  osThreadExit();
   /* USER CODE END StartDefaultTask */
 }
 

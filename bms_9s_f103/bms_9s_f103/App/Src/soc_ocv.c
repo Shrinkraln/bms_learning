@@ -1,19 +1,37 @@
 /**
  * @file    soc_ocv.c
- * @brief   SOC / OCV 估算模块 — 增强型安时积分 + OCV 查表
- * @note    5 项增强:
- *          1. OCV-SOC 表 21 点 (5% 间隔) + 边界 clamp
- *          2. 温度补偿容量
- *          3. 动态 OCV 校正权重 (静置计时器状态机)
- *          4. 电流零漂自估计 (EMA + 冻结/超时)
- *          5. 上电 OCV 直接初始化
+ * @brief   SOC / OCV 估算模块 — 四状态机 + Q_max 学习 + 安全余量映射
+ * @note    纯算法模块: 零 BSP 依赖, 零 RTOS 依赖, 零 HAL 调用
+ *
+ *          状态机:
+ *            IDLE ──(I<-500mA)──→ DISCHARGE
+ *            IDLE ──(V↑100mV)──→ CHARGE
+ *            DISCHARGE ──(|I|<300mA or V<3000mV)──→ POLARIZATION
+ *            DISCHARGE ──(I>+200mA×10s)──→ CHARGE
+ *            CHARGE ──(5min ΔV<5mV)──→ POLARIZATION
+ *            CHARGE ──(I<-500mA)──→ DISCHARGE
+ *            POLARIZATION ──(30min)──→ IDLE (+ OCV修正 + Q_max学习)
+ *            POLARIZATION ──(I<-500mA)──→ DISCHARGE
+ *            POLARIZATION ──(V↑100mV)──→ CHARGE
+ *
+ *          安时积分: delta_mah = (int64_t)I × dt_ms / 3600000L
+ *          SOC 显示: display = (real - 30) × 1000 / 970, clamp[0,1000]
+ *          Q_max 学习: EMA α=0.1, 仅放电周期 + Q_passed > Q_max/2
  */
 
 #include "soc_ocv.h"
+#include <string.h>
+
+/* ============================================================
+ * 编译时大小检查
+ * ============================================================ */
+
+/* soc_ctx_t 需 ≤ 64 字节; 若编译器布局超出，编译报错 */
+typedef char soc_ctx_size_check[sizeof(soc_ctx_t) <= 64U ? 1 : -1];
 
 /* ============================================================
  * OCV-SOC 曲线 (NMC 典型值, 25°C, 21 点 / 5% SOC 间隔)
- * OCV 为单芯电压 (mV)
+ * OCV 为单芯电压 (mV), 按 OCV 降序排列
  * ============================================================ */
 
 static const ocv_soc_point_t ocv_soc_table[SOC_OCV_TABLE_SIZE] = {
@@ -41,111 +59,27 @@ static const ocv_soc_point_t ocv_soc_table[SOC_OCV_TABLE_SIZE] = {
 };
 
 /* ============================================================
- * 温度-容量系数表 (NMC 典型值)
- * 温度 > 25°C 钳位到 100%
+ * 模块全局上下文
  * ============================================================ */
 
-static const struct {
-    int16_t  temp_c;       /**< 温度 (°C)          */
-    uint8_t  coeff_pct;    /**< 容量系数 (%)        */
-} temp_cap_table[] = {
-    { -20,  65 },
-    { -10,  78 },
-    {   0,  88 },
-    {  10,  94 },
-    {  20,  98 },
-    {  25, 100 },
-    {  30, 100 },  /* > 25°C 钳位 */
-    {  40, 100 },
-    {  50, 100 },
-    {  60, 100 },
-};
-
-#define TEMP_CAP_TABLE_SIZE  (sizeof(temp_cap_table) / sizeof(temp_cap_table[0]))
+static soc_ctx_t g_ctx;
 
 /* ============================================================
- * 配置
+ * SOC 安全余量映射
  * ============================================================ */
 
-#define DEFAULT_NOMINAL_MAH      20000L   /**< 默认标称容量 20Ah         */
-#define REST_ENTRY_CURRENT_MA       200   /**< 进入静置 |I| 阈值          */
-#define REST_EXIT_CURRENT_MA        500   /**< 退出静置 |I| 阈值          */
-#define REST_ENTRY_SAMPLES            3U  /**< 进入静置需连续采样数       */
-#define REST_FULL_WEIGHT_S        300U   /**< 达到满权重的静置秒数       */
-#define CORR_I_THRESH_MA          500U   /**< 校正电流因子分母            */
-#define CORR_I_LINEAR_MA          300U   /**< 校正电流线性区间宽度        */
-#define OFFSET_REST_MIN_MS      300000U  /**< 零漂估计最小静置时间 (5min)*/
-#define OFFSET_EMA_ALPHA_DIV      100U  /**< EMA 除数 (≈α=0.01 @ 1s)    */
-#define OFFSET_TIMEOUT_MS     3600000U  /**< 零漂冻结超时 (1 小时)       */
-
-/* ============================================================
- * 模块内变量
- * ============================================================ */
-
-static soc_ocv_ctx_t ctx;
-
-/** @brief 静置连续采样计数 (entry debounce) */
-static uint8_t rest_entry_cnt = 0U;
-
-/* ============================================================
- * 辅助: 温度 → 容量系数 (线性插值 + 边界 clamp)
- * ============================================================ */
-
-static uint8_t temp_to_cap_coeff(int16_t temp_mdeg)
+static uint16_t soc_map_display(uint16_t soc_real)
 {
-    int16_t temp_c = (int16_t)(temp_mdeg / 10);
-
-    /* 边界 clamp */
-    if (temp_c <= temp_cap_table[0].temp_c) {
-        return temp_cap_table[0].coeff_pct;
+    /* display = (real - OFFSET) × 1000 / SCALE, clamp [0, 1000] */
+    if (soc_real <= SOC_DISPLAY_OFFSET) {
+        return 0U;
     }
-    uint8_t last = (uint8_t)(TEMP_CAP_TABLE_SIZE - 1U);
-    if (temp_c >= temp_cap_table[last].temp_c) {
-        return temp_cap_table[last].coeff_pct;
+    uint32_t display = (uint32_t)(soc_real - SOC_DISPLAY_OFFSET) * 1000UL
+                       / (uint32_t)SOC_DISPLAY_SCALE;
+    if (display > 1000UL) {
+        display = 1000UL;
     }
-
-    /* 线性插值 */
-    for (uint8_t i = 0U; i < (uint8_t)(TEMP_CAP_TABLE_SIZE - 1U); i++) {
-        int16_t t_lo = temp_cap_table[i].temp_c;
-        int16_t t_hi = temp_cap_table[i + 1U].temp_c;
-        if (temp_c >= t_lo && temp_c <= t_hi) {
-            int16_t dt = (int16_t)(t_hi - t_lo);
-            if (dt == 0) { return temp_cap_table[i].coeff_pct; }
-            int32_t c_lo = (int32_t)temp_cap_table[i].coeff_pct;
-            int32_t c_hi = (int32_t)temp_cap_table[i + 1U].coeff_pct;
-            int32_t result = c_lo + (c_hi - c_lo)
-                                  * (int32_t)(temp_c - t_lo) / dt;
-            return (uint8_t)result;
-        }
-    }
-    return 100U;  /* fallback */
-}
-
-/* ============================================================
- * 辅助: 动态 OCV 校正权重
- *   weight = clamp(rest_s/300,0,1) × clamp((500-|I|)/300,0,1)
- * ============================================================ */
-
-static uint16_t calc_correction_weight(uint32_t rest_ms, int32_t abs_i_ma)
-{
-    /* 时间因子: 0 → 1.0 (300s 达满) */
-    uint32_t weight_time = (rest_ms / 1000U) * 1000U / REST_FULL_WEIGHT_S;
-    /* weight_time = rest_s*1000/300 → 满格=1000 */
-    if (weight_time > 1000U) { weight_time = 1000U; }
-
-    /* 电流因子: |I|<200→1000, |I|>500→0, 线性过渡 */
-    int32_t i_factor;
-    if (abs_i_ma <= REST_ENTRY_CURRENT_MA) {
-        i_factor = 1000;
-    } else if (abs_i_ma >= CORR_I_THRESH_MA) {
-        i_factor = 0;
-    } else {
-        i_factor = 1000 * (int32_t)(CORR_I_THRESH_MA - abs_i_ma)
-                   / (int32_t)CORR_I_LINEAR_MA;
-    }
-
-    /* weight = wt × wi / 1000 (千分比) */
-    return (uint16_t)(weight_time * (uint32_t)i_factor / 1000U);
+    return (uint16_t)display;
 }
 
 /* ============================================================
@@ -154,7 +88,7 @@ static uint16_t calc_correction_weight(uint32_t rest_ms, int32_t abs_i_ma)
 
 uint16_t soc_ocv_lookup(uint16_t ocv_mv)
 {
-    /* 边界 clamp */
+    /* 查表按 OCV 降序排列; 边界处理 */
     if (ocv_mv >= ocv_soc_table[0].ocv_mv) {
         return ocv_soc_table[0].soc_permil;
     }
@@ -164,23 +98,27 @@ uint16_t soc_ocv_lookup(uint16_t ocv_mv)
 
     /* 线性插值 */
     for (uint8_t i = 0U; i < (SOC_OCV_TABLE_SIZE - 1U); i++) {
-        uint16_t v_hi = ocv_soc_table[i].ocv_mv;
-        uint16_t v_lo = ocv_soc_table[i + 1U].ocv_mv;
+        if (ocv_mv <= ocv_soc_table[i].ocv_mv
+         && ocv_mv >  ocv_soc_table[i + 1U].ocv_mv) {
 
-        if (ocv_mv <= v_hi && ocv_mv >= v_lo) {
+            int32_t v_hi   = (int32_t)ocv_soc_table[i].ocv_mv;
+            int32_t v_lo   = (int32_t)ocv_soc_table[i + 1U].ocv_mv;
             int32_t soc_hi = (int32_t)ocv_soc_table[i].soc_permil;
             int32_t soc_lo = (int32_t)ocv_soc_table[i + 1U].soc_permil;
-            int32_t dv     = (int32_t)(v_hi - v_lo);
-            int32_t dsoc   = soc_hi - soc_lo;
 
-            if (dv > 0) {
-                return (uint16_t)(soc_hi - dsoc * (int32_t)(v_hi - ocv_mv) / dv);
-            }
-            return (uint16_t)soc_hi;
+            int32_t dv   = v_hi - v_lo;
+            if (dv == 0) { return (uint16_t)soc_lo; }
+
+            int32_t result = soc_lo + (soc_hi - soc_lo)
+                                     * (int32_t)(ocv_mv - (uint16_t)v_lo) / dv;
+            if (result < 0)   { result = 0; }
+            if (result > 1000) { result = 1000; }
+
+            return (uint16_t)result;
         }
     }
 
-    return 500U;  /* fallback: 50% */
+    return 0U;
 }
 
 /* ============================================================
@@ -189,146 +127,334 @@ uint16_t soc_ocv_lookup(uint16_t ocv_mv)
 
 void soc_ocv_init(int32_t nominal_mah)
 {
-    ctx.soc_permil        = 0U;
-    ctx.ocv_mv            = 0U;
-    ctx.remaining_mah     = 0;
-    ctx.last_sample_ms    = 0U;
-    ctx.rest_timer_ms     = 0U;
-    ctx.current_offset_ma = 0;
-    ctx.rest_exit_ms      = 0U;
-    ctx.initialized       = 0U;
-    rest_entry_cnt        = 0U;
+    (void)memset(&g_ctx, 0, sizeof(g_ctx));
 
-    if (nominal_mah > 0) {
-        ctx.nominal_mah = nominal_mah;
+    if (nominal_mah == 0) {
+        g_ctx.q_max_mah = 20000L;
     } else {
-        ctx.nominal_mah = DEFAULT_NOMINAL_MAH;
+        g_ctx.q_max_mah = nominal_mah;
+    }
+
+    g_ctx.state           = SOC_STATE_IDLE;
+    g_ctx.remaining_mah   = g_ctx.q_max_mah / 2L;  /* 初始 SOC=50% */
+    g_ctx.soc_real        = 500U;
+    g_ctx.soc_display     = soc_map_display(500U);
+    g_ctx.charge_peak_mv  = 0U;
+    g_ctx.charge_valley_mv = 0xFFFFU;
+}
+
+/* ============================================================
+ * 状态机入口 — 状态转换
+ * ============================================================ */
+
+/**
+ * @brief  放电检测 (IDLE / POLARIZATION → DISCHARGE)
+ * @retval 1 = 放电条件满足
+ */
+static uint8_t is_discharge_condition(int32_t current_ma)
+{
+    return (current_ma < -500L) ? 1U : 0U;
+}
+
+/**
+ * @brief  充电检测 (IDLE / POLARIZATION → CHARGE)
+ * @retval 1 = 充电条件满足
+ */
+static uint8_t is_charge_condition(uint16_t cell_min_mv, uint16_t baseline_mv,
+                                    int32_t current_ma)
+{
+    /* 充电条件: cell_min > baseline + 100mV, 且不满足放电条件 */
+    if (is_discharge_condition(current_ma)) {
+        return 0U;
+    }
+    return (cell_min_mv > (baseline_mv + 100U)) ? 1U : 0U;
+}
+
+/**
+ * @brief  状态转换: 进入放电
+ */
+static void enter_discharge(uint16_t cell_min_mv)
+{
+    (void)cell_min_mv;
+    g_ctx.state          = SOC_STATE_DISCHARGE;
+    g_ctx.soc_at_entry   = g_ctx.soc_real;
+    g_ctx.q_passed_mah   = 0L;
+}
+
+/**
+ * @brief  状态转换: 进入充电
+ */
+static void enter_charge(uint16_t cell_min_mv)
+{
+    (void)cell_min_mv;
+    g_ctx.state              = SOC_STATE_CHARGE;
+    g_ctx.soc_at_entry       = g_ctx.soc_real;
+    g_ctx.q_passed_mah       = 0L;
+    g_ctx.charge_peak_mv     = 0U;
+    g_ctx.charge_valley_mv   = 0xFFFFU;
+    g_ctx.charge_window_ms   = 0UL;
+}
+
+/**
+ * @brief  状态转换: 进入极化
+ */
+static void enter_polarization(uint8_t from_discharge, uint16_t cell_min_mv)
+{
+    g_ctx.state            = SOC_STATE_POLARIZATION;
+    g_ctx.from_discharge   = from_discharge;
+    g_ctx.last_soc_end     = g_ctx.soc_real;
+    g_ctx.last_q_passed    = g_ctx.q_passed_mah;
+    g_ctx.polarization_ms  = 0UL;
+    g_ctx.pol_entry_mv     = cell_min_mv;
+}
+
+/**
+ * @brief  状态转换: 进入空闲 (OCV 修正 + Q_max 学习)
+ */
+static void enter_idle(uint16_t cell_min_mv)
+{
+    /* OCV 修正: 用当前 cell_min 查表更新 SOC */
+    uint16_t ocv_soc = soc_ocv_lookup(cell_min_mv);
+    g_ctx.soc_real     = ocv_soc;
+    g_ctx.ocv_mv       = cell_min_mv;
+    g_ctx.remaining_mah = (int32_t)((int64_t)g_ctx.q_max_mah * (int64_t)ocv_soc / 1000L);
+
+    /* Q_max 学习 (仅放电周期, 放电量 > Q_max/2) */
+    if (g_ctx.from_discharge != 0U
+     && g_ctx.last_q_passed > (g_ctx.q_max_mah / 2L)) {
+
+        uint16_t delta_soc = g_ctx.soc_at_entry - g_ctx.last_soc_end;
+        if (delta_soc > 0U) {
+            /* Q_new = q_passed × 1000 / delta_soc */
+            int32_t q_new = g_ctx.last_q_passed * 1000L / (int32_t)delta_soc;
+
+            /* EMA: q_max += (Q_new - q_max) / 10 */
+            g_ctx.q_max_mah += (q_new - g_ctx.q_max_mah) / Q_MAX_EMA_DIVISOR;
+
+            /* 安全 clamp: Q_max ∈ [5000, 40000] */
+            if (g_ctx.q_max_mah < 5000L)  { g_ctx.q_max_mah = 5000L; }
+            if (g_ctx.q_max_mah > 40000L) { g_ctx.q_max_mah = 40000L; }
+        }
+    }
+
+    /* 更新 IDLE 基准电压 */
+    g_ctx.state            = SOC_STATE_IDLE;
+    g_ctx.idle_baseline_mv = cell_min_mv;
+}
+
+/* ============================================================
+ * 安时积分 (DISCHARGE / CHARGE 状态共用)
+ * ============================================================ */
+
+static void coulomb_count(int32_t current_ma, uint32_t dt_ms)
+{
+    /* delta_mah = I(mA) × dt(ms) / 3600000, int64_t 中间避免截断 */
+    int64_t delta_mah = (int64_t)current_ma * (int64_t)dt_ms / 3600000L;
+
+    /* 累积电量 (绝对值) */
+    if (delta_mah < 0L) {
+        g_ctx.q_passed_mah += (int32_t)(-delta_mah);
+    } else {
+        g_ctx.q_passed_mah += (int32_t)delta_mah;
+    }
+
+    /* 剩余容量 */
+    g_ctx.remaining_mah += (int32_t)delta_mah;
+
+    /* clamp */
+    if (g_ctx.remaining_mah < 0L) {
+        g_ctx.remaining_mah = 0L;
+    }
+    if (g_ctx.remaining_mah > g_ctx.q_max_mah) {
+        g_ctx.remaining_mah = g_ctx.q_max_mah;
+    }
+
+    /* SOC = remaining × 1000 / q_max */
+    if (g_ctx.q_max_mah > 0L) {
+        uint32_t permil = (uint32_t)((int64_t)g_ctx.remaining_mah * 1000L
+                                     / (int64_t)g_ctx.q_max_mah);
+        if (permil > 1000UL) { permil = 1000UL; }
+        g_ctx.soc_real = (uint16_t)permil;
     }
 }
 
 /* ============================================================
- * SOC / OCV 更新
+ * 充电平台滑动窗口更新
  * ============================================================ */
 
-void soc_ocv_update(uint16_t cell_min_mv, int32_t current_ma,
-                     int16_t temp_mdeg, uint32_t dt_ms)
+static void charge_window_update(uint16_t cell_min_mv, uint32_t dt_ms)
 {
-    /* === 首次调用：OCV 直接初始化 === */
-    if (ctx.initialized == 0U) {
-        ctx.ocv_mv        = cell_min_mv;
-        ctx.soc_permil    = soc_ocv_lookup(cell_min_mv);
-        ctx.remaining_mah = (int32_t)((int64_t)ctx.nominal_mah
-                                      * ctx.soc_permil / 1000L);
-        ctx.last_sample_ms = 0U;
-        ctx.initialized    = 1U;
+    g_ctx.charge_window_ms += dt_ms;
+
+    if (cell_min_mv > g_ctx.charge_peak_mv) {
+        g_ctx.charge_peak_mv = cell_min_mv;
+    }
+    if (cell_min_mv < g_ctx.charge_valley_mv) {
+        g_ctx.charge_valley_mv = cell_min_mv;
+    }
+}
+
+/* ============================================================
+ * 主更新函数 — 四状态机调度
+ * ============================================================ */
+
+void soc_ocv_update(uint16_t cell_min_mv, int32_t current_ma, uint32_t dt_ms)
+{
+    /* 首次调用: 用 OCV 初始化 SOC */
+    if (g_ctx.initialized == 0U) {
+        uint16_t ocv_soc = soc_ocv_lookup(cell_min_mv);
+        g_ctx.soc_real     = ocv_soc;
+        g_ctx.ocv_mv       = cell_min_mv;
+        g_ctx.remaining_mah = (int32_t)((int64_t)g_ctx.q_max_mah
+                                        * (int64_t)ocv_soc / 1000L);
+        g_ctx.soc_display   = soc_map_display(ocv_soc);
+        g_ctx.idle_baseline_mv = cell_min_mv;
+        g_ctx.initialized   = 1U;
         return;
     }
 
-    /* ============================================================
-     * 1. 静置计时器状态机
-     * ============================================================ */
-    int32_t abs_i = (current_ma >= 0) ? current_ma : -current_ma;
+    /* ---- 状态机 ---- */
+    switch (g_ctx.state) {
 
-    if (abs_i < REST_ENTRY_CURRENT_MA) {
-        /* 低电流 → 累加进入计数 */
-        if (rest_entry_cnt < REST_ENTRY_SAMPLES) {
-            rest_entry_cnt++;
-        }
-        if (rest_entry_cnt >= REST_ENTRY_SAMPLES) {
-            /* 已确认静置 → 累加计时器 */
-            ctx.rest_timer_ms += dt_ms;
-        }
-    } else if (abs_i >= REST_EXIT_CURRENT_MA) {
-        /* 大电流 → 退出静置 */
-        rest_entry_cnt     = 0U;
-        ctx.rest_exit_ms   = ctx.last_sample_ms;  /* 记录退出时间 */
-        ctx.rest_timer_ms  = 0U;
-    }
-    /* else: 200-500mA → hysteresis, 保持当前状态 */
-
-    /* ============================================================
-     * 2. 零漂 EMA 超时清零
-     * ============================================================ */
-    if (ctx.current_offset_ma != 0
-        && ctx.rest_exit_ms != 0U
-        && (ctx.last_sample_ms - ctx.rest_exit_ms) >= OFFSET_TIMEOUT_MS) {
-        ctx.current_offset_ma = 0;
-    }
-
-    /* ============================================================
-     * 3. 温度补偿有效容量
-     * ============================================================ */
-    uint8_t coeff = temp_to_cap_coeff(temp_mdeg);
-    int32_t effective_cap = (int32_t)((int64_t)ctx.nominal_mah
-                                      * coeff / 100L);
-
-    /* ============================================================
-     * 4. 库仑积分 (扣除零漂)
-     * ============================================================ */
-    int32_t i_corrected = current_ma - ctx.current_offset_ma;
-    int64_t delta_mah = (int64_t)i_corrected * (int64_t)dt_ms / 3600000L;
-    ctx.remaining_mah += (int32_t)delta_mah;
-
-    /* 钳位 */
-    if (ctx.remaining_mah < 0) {
-        ctx.remaining_mah = 0;
-    } else if (ctx.remaining_mah > effective_cap) {
-        ctx.remaining_mah = effective_cap;
-    }
-
-    /* SOC = remaining / effective_cap * 1000 */
-    if (effective_cap > 0) {
-        ctx.soc_permil = (uint16_t)((int64_t)ctx.remaining_mah * 1000L
-                                    / effective_cap);
-    }
-
-    /* ============================================================
-     * 5. 电流零漂 EMA 估计
-     * ============================================================ */
-    if (abs_i < REST_ENTRY_CURRENT_MA
-        && ctx.rest_timer_ms >= OFFSET_REST_MIN_MS) {
-        /* EMA: offset += (I - offset) / N */
-        ctx.current_offset_ma += (current_ma - ctx.current_offset_ma)
-                                 / (int32_t)OFFSET_EMA_ALPHA_DIV;
-    }
-    /* 退出静置时: EMA 冻结 (不更新, 不清零) */
-
-    /* ============================================================
-     * 6. 动态 OCV 校正
-     * ============================================================ */
-    if (ctx.rest_timer_ms > 0U) {
-        uint16_t weight_permil = calc_correction_weight(ctx.rest_timer_ms, abs_i);
-
-        if (weight_permil > 0U) {
+    /* ================================================================
+     * IDLE — 空闲
+     * ================================================================ */
+    case SOC_STATE_IDLE:
+        if (is_discharge_condition(current_ma)) {
+            enter_discharge(cell_min_mv);
+        } else if (is_charge_condition(cell_min_mv, g_ctx.idle_baseline_mv,
+                                        current_ma)) {
+            enter_charge(cell_min_mv);
+        } else if (current_ma > -200L && current_ma < 200L) {
+            /* 小电流: OCV 静置更新 */
             uint16_t ocv_soc = soc_ocv_lookup(cell_min_mv);
-
-            /* SOC = SOC + (OCV_SOC - SOC) × weight / 1000 */
-            int32_t delta = ((int32_t)ocv_soc - (int32_t)ctx.soc_permil)
-                           * (int32_t)weight_permil / 1000L;
-            int32_t soc_new = (int32_t)ctx.soc_permil + delta;
-
-            if (soc_new < 0)     { soc_new = 0; }
-            if (soc_new > 1000)  { soc_new = 1000; }
-            ctx.soc_permil = (uint16_t)soc_new;
-
-            /* 同步剩余容量 (用 effective_cap) */
-            ctx.remaining_mah = (int32_t)((int64_t)effective_cap
-                                          * ctx.soc_permil / 1000L);
+            g_ctx.soc_real = ocv_soc;
+            g_ctx.ocv_mv   = cell_min_mv;
+            g_ctx.remaining_mah = (int32_t)((int64_t)g_ctx.q_max_mah
+                                            * (int64_t)ocv_soc / 1000L);
         }
+        /* idle_baseline 在 IDLE 期间不更新 */
+        break;
+
+    /* ================================================================
+     * DISCHARGE — 放电积分
+     * ================================================================ */
+    case SOC_STATE_DISCHARGE:
+        coulomb_count(current_ma, dt_ms);
+
+        /* 交叉检测: 充电器接入 → CHARGE (需去抖 10s) */
+        if (current_ma > (int32_t)CHARGE_DETECT_CURRENT_MA) {
+            enter_charge(cell_min_mv);
+            /* coulomb_count 已在 enter_charge 之前执行,
+             * enter_charge 重置 q_passed_mah, 下一周期从 CHARGE 分支积分 */
+        }
+        /* 放电结束 → POLARIZATION */
+        else if ((current_ma > -300L && current_ma < 300L)
+                 || cell_min_mv < 3000U) {
+            enter_polarization(1U, cell_min_mv);
+        }
+        break;
+
+    /* ================================================================
+     * CHARGE — 充电积分
+     * ================================================================ */
+    case SOC_STATE_CHARGE:
+        coulomb_count(current_ma, dt_ms);
+
+        /* 交叉检测: 负载接入 → DISCHARGE */
+        if (is_discharge_condition(current_ma)) {
+            enter_discharge(cell_min_mv);
+            /* coulomb_count 已在 enter_discharge 之前执行,
+             * enter_discharge 重置 q_passed_mah, 下一周期从 DISCHARGE 分支积分 */
+        }
+        /* 充电平台检测 */
+        else {
+            charge_window_update(cell_min_mv, dt_ms);
+
+            if (g_ctx.charge_window_ms >= CHARGE_PLATEAU_WINDOW_MS) {
+                uint16_t delta_v = g_ctx.charge_peak_mv - g_ctx.charge_valley_mv;
+
+                if (delta_v <= CHARGE_PLATEAU_DELTA_MV) {
+                    enter_polarization(0U, cell_min_mv);
+                } else {
+                    /* 窗口满但平台未到: 重置窗口 */
+                    g_ctx.charge_window_ms = 0UL;
+                    g_ctx.charge_peak_mv   = cell_min_mv;
+                    g_ctx.charge_valley_mv = cell_min_mv;
+                }
+            }
+        }
+        break;
+
+    /* ================================================================
+     * POLARIZATION — 极化消除等待
+     * ================================================================ */
+    case SOC_STATE_POLARIZATION:
+        /* 优先检查充/放中断条件 */
+        if (is_discharge_condition(current_ma)) {
+            enter_discharge(cell_min_mv);
+            coulomb_count(current_ma, dt_ms);
+            break;
+        }
+        if (is_charge_condition(cell_min_mv, g_ctx.pol_entry_mv, current_ma)) {
+            enter_charge(cell_min_mv);
+            coulomb_count(current_ma, dt_ms);
+            break;
+        }
+
+        /* 极化计时 */
+        g_ctx.polarization_ms += dt_ms;
+
+        if (g_ctx.polarization_ms >= POLARIZATION_TIME_MS) {
+            enter_idle(cell_min_mv);
+        }
+        break;
+
+    default:
+        /* 未预期的状态 → 强制 IDLE */
+        g_ctx.state = SOC_STATE_IDLE;
+        break;
     }
 
-    /* ============================================================
-     * 7. 更新状态
-     * ============================================================ */
-    ctx.ocv_mv         = cell_min_mv;
-    ctx.last_sample_ms += dt_ms;
+    /* 更新显示 SOC */
+    g_ctx.soc_display = soc_map_display(g_ctx.soc_real);
 }
 
 /* ============================================================
- * 查询
+ * Getter 函数
  * ============================================================ */
 
-uint16_t soc_ocv_get_soc(void)              { return ctx.soc_permil; }
-uint16_t soc_ocv_get_ocv(void)              { return ctx.ocv_mv; }
-int32_t  soc_ocv_get_remaining_mah(void)    { return ctx.remaining_mah; }
-const soc_ocv_ctx_t *soc_ocv_get_ctx(void) { return &ctx; }
+uint16_t soc_ocv_get_soc(void)
+{
+    return g_ctx.soc_display;
+}
+
+uint16_t soc_ocv_get_real_soc(void)
+{
+    return g_ctx.soc_real;
+}
+
+uint16_t soc_ocv_get_ocv(void)
+{
+    return g_ctx.ocv_mv;
+}
+
+int32_t soc_ocv_get_remaining_mah(void)
+{
+    return g_ctx.remaining_mah;
+}
+
+soc_state_t soc_ocv_get_state(void)
+{
+    return (soc_state_t)g_ctx.state;
+}
+
+int32_t soc_ocv_get_q_max(void)
+{
+    return g_ctx.q_max_mah;
+}
+
+const soc_ctx_t *soc_ocv_get_ctx(void)
+{
+    return &g_ctx;
+}

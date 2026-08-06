@@ -7,8 +7,8 @@
  *          - 在调试模式下可配置为暂停计数
  */
 
-#ifndef __BSP_WDG_H
-#define __BSP_WDG_H
+#ifndef BSP_WDG_H
+#define BSP_WDG_H
 
 #include "stm32f1xx_hal.h"
 
@@ -73,4 +73,4 @@ void wdg_debug_pause(void);
 }
 #endif
 
-#endif /* __BSP_WDG_H */
+#endif /* BSP_WDG_H */

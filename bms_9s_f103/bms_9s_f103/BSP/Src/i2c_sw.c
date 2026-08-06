@@ -38,6 +38,9 @@ void i2c_sw_init(void)
     /* 确保 tick 系统已初始化（DWT 用于微秒延时） */
     bsp_tick_init();
 
+    /* 显式使能 GPIOB 时钟 (PB10/PB11 不在 CubeMX 引脚配置中) */
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
     /* 配置 SCL/SDA 为开漏输出 */
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 

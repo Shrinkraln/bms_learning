@@ -23,7 +23,6 @@
 #include "i2c.h"
 #include "iwdg.h"
 #include "tim.h"
-#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -98,14 +97,16 @@ int main(void)
   MX_I2C1_Init();
   MX_IWDG_Init();
   MX_TIM2_Init();
-  MX_USART1_UART_Init();
-  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  bms_app_init();
+
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+
+  /* USER CODE BEGIN 2_AFTER_INIT */
+  bms_app_init();  /* 必须在 osKernelInitialize() 之后: 内部创建 RTOS 对象 */
+  /* USER CODE END 2_AFTER_INIT */
   MX_FREERTOS_Init();
 
   /* Start scheduler */

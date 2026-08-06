@@ -1,42 +1,38 @@
 /**
  * @file    can_cmd.c
- * @brief   CAN 指令协议实现 — 接收分发 + 周期上报
+ * @brief   CAN 指令协议实现 — 纯协议解析 + 周期性上报帧生成
+ * @note    can_cmd_dispatch() 返回 can_action_req_t, 零 BSP 调用
+ *          can_pub() 生成上报帧, 调用者负责发送
  */
 
 #include "can_cmd.h"
 #include "soc_ocv.h"
-#include "io_ctrl.h"
+#include <string.h>
 
 /* ============================================================
- * 前向声明（静态辅助函数）
+ * 配置查询子命令
  * ============================================================ */
 
-static void can_cmd_handle_query(uint8_t sub_cmd);
-static void can_cmd_handle_control(const can_msg_t *msg);
-static void can_cmd_handle_config(const can_msg_t *msg);
-static void can_tx_status(const bms_shared_t *bms);
-static void can_tx_cells(const bms_shared_t *bms);
-static void can_tx_protection(const bms_shared_t *bms);
-static void can_tx_soc_ocv(const bms_shared_t *bms);
+#define CAN_QUERY_ALL       0x00U
+#define CAN_QUERY_STATUS    0x01U
+#define CAN_QUERY_CELLS     0x02U
+#define CAN_QUERY_PROTECTION 0x03U
+#define CAN_QUERY_SOC       0x04U
+
+/* ============================================================
+ * 配置参数类型 (0x202)
+ * ============================================================ */
+
+#define CAN_CFG_CELL_OV_MV       0x01U
+#define CAN_CFG_CELL_UV_MV       0x02U
+#define CAN_CFG_DISCHARGE_OC_MA  0x03U
+#define CAN_CFG_CHARGE_OC_MA     0x04U
+#define CAN_CFG_BALANCE_THRESH_MV 0x05U
+#define CAN_CFG_BALANCE_MIN_MV   0x06U
 
 /* ============================================================
  * 模块内变量
  * ============================================================ */
-
-/** @brief CAN 接收消息队列 */
-osMessageQueueId_t can_rx_queue = NULL;
-
-/* ============================================================
- * CAN 接收回调（ISR 中调用 → 快速入队）
- * ============================================================ */
-
-static void can_rx_isr_callback(const can_msg_t *msg)
-{
-    if (can_rx_queue != NULL && msg != NULL) {
-        /* 非阻塞发送到队列，忽略满队情况 */
-        osMessageQueuePut(can_rx_queue, msg, 0U, 0U);
-    }
-}
 
 /* ============================================================
  * 初始化
@@ -44,324 +40,273 @@ static void can_rx_isr_callback(const can_msg_t *msg)
 
 void can_cmd_init(void)
 {
-    /* 创建消息队列 */
-    can_rx_queue = osMessageQueueNew(CAN_RX_QUEUE_DEPTH,
-                                      sizeof(can_msg_t), NULL);
-
-    /* 注册 CAN 接收回调 */
-    can_register_rx_callback(can_rx_isr_callback);
+    /* CAN RX 由 can_drv 内部 ring_buf 处理, 无需额外队列 */
 }
 
 /* ============================================================
- * CAN 接收任务
+ * CAN RX 轮询 (由 task_can_rx 调用)
  * ============================================================ */
 
-void can_cmd_task_entry(void *argument)
+/**
+ * @brief  CAN RX 已由 can_drv 层处理, 此函数保留供兼容
+ * @retval 始终返回 1 (空)
+ */
+uint8_t can_cmd_poll_rx(can_msg_t *msg)
 {
-    (void)argument;
-    can_msg_t msg;
-
-    for (;;) {
-        /* 阻塞等待 CAN 消息 */
-        osStatus_t status = osMessageQueueGet(can_rx_queue, &msg, NULL,
-                                               osWaitForever);
-        if (status == osOK) {
-            can_cmd_dispatch(&msg);
-        }
-    }
+    (void)msg;
+    return 1U;
 }
 
 /* ============================================================
  * 指令分发
  * ============================================================ */
 
-void can_cmd_dispatch(const can_msg_t *msg)
+/**
+ * @brief  处理查询命令 — 根据 sub_cmd 生成不同响应帧
+ */
+static void handle_query(uint8_t sub_cmd, bms_shared_t *bms, can_msg_t *resp)
 {
-    if (msg == NULL) { return; }
+    if (bms == NULL || resp == NULL) { return; }
 
-    switch (msg->id) {
-        case CAN_RX_QUERY:
-            /* 查询命令 */
-            if (msg->dlc >= 1U) {
-                can_cmd_handle_query(msg->data[0]);
-            }
-            break;
-
-        case CAN_RX_CONTROL:
-            /* 控制命令 */
-            if (msg->dlc >= 1U) {
-                can_cmd_handle_control(msg);
-            }
-            break;
-
-        case CAN_RX_CONFIG:
-            /* 参数配置 */
-            if (msg->dlc >= 4U) {
-                can_cmd_handle_config(msg);
-            }
-            break;
-
-        default:
-            break;
-    }
-}
-
-/* ============================================================
- * 查询处理
- * ============================================================ */
-
-static void can_cmd_handle_query(uint8_t sub_cmd)
-{
-    bms_shared_t *bms = bms_shared_data_lock(osWaitForever);
-    if (bms == NULL) { return; }
+    const bq76940_cell_data_t *cells = &bms->battery_val.cells;
+    uint32_t pack_mv = cells->total_mv;
+    int32_t  current = bms->battery_val.current.current_ma;
 
     switch (sub_cmd) {
-        case CAN_QUERY_ALL:
-            can_tx_status(bms);
-            can_tx_cells(bms);
-            can_tx_protection(bms);
-            can_tx_soc_ocv(bms);
-            break;
-        case CAN_QUERY_STATUS:
-            can_tx_status(bms);
-            break;
-        case CAN_QUERY_CELLS:
-            can_tx_cells(bms);
-            break;
-        case CAN_QUERY_PROTECTION:
-            can_tx_protection(bms);
-            break;
-        case CAN_QUERY_SOC:
-            can_tx_soc_ocv(bms);
-            break;
-        default:
-            break;
-    }
+    case CAN_QUERY_ALL:
+    case CAN_QUERY_STATUS:
+    default:
+        /* BMS_STATUS 帧 (0x100) */
+        resp->id  = CAN_TX_BMS_STATUS;
+        resp->len = 8U;
+        {
+            int16_t i_scaled = (int16_t)(current / 10L);
+            resp->data[0] = (uint8_t)(bms->soc_permil / 10U);
+            resp->data[1] = (uint8_t)((pack_mv >> 8U) & 0xFFU);
+            resp->data[2] = (uint8_t)(pack_mv & 0xFFU);
+            resp->data[3] = (uint8_t)(((uint16_t)i_scaled >> 8U) & 0xFFU);
+            resp->data[4] = (uint8_t)((uint16_t)i_scaled & 0xFFU);
+            resp->data[5] = (uint8_t)bms->prot_level;
+            resp->data[6] = 0x00U;
+            resp->data[7] = 0x00U;
+        }
+        break;
 
-    bms_shared_data_unlock();
+    case CAN_QUERY_CELLS:
+        /* CELL_VOLT_1_4 帧 (0x110) */
+        resp->id  = CAN_TX_CELL_VOLT_1_4;
+        resp->len = 8U;
+        for (uint8_t i = 0U; i < 4U; i++) {
+            resp->data[i * 2U]     = (uint8_t)((cells->cell_mv[i] >> 8U) & 0xFFU);
+            resp->data[i * 2U + 1U] = (uint8_t)(cells->cell_mv[i] & 0xFFU);
+        }
+        break;
+
+    case CAN_QUERY_PROTECTION:
+        /* 保护状态帧 (0x100) */
+        resp->id  = CAN_TX_BMS_STATUS;
+        resp->len = 8U;
+        resp->data[0] = (uint8_t)bms->prot_level;
+        resp->data[1] = (uint8_t)((bms->active_faults >> 8U) & 0xFFU);
+        resp->data[2] = (uint8_t)(bms->active_faults & 0xFFU);
+        resp->data[3] = (uint8_t)((cells->max_mv >> 8U) & 0xFFU);
+        resp->data[4] = (uint8_t)(cells->max_mv & 0xFFU);
+        resp->data[5] = (uint8_t)((cells->min_mv >> 8U) & 0xFFU);
+        resp->data[6] = (uint8_t)(cells->min_mv & 0xFFU);
+        resp->data[7] = 0x00U;
+        break;
+
+    case CAN_QUERY_SOC:
+        /* SOC_OCV 帧 (0x130) */
+        resp->id  = CAN_TX_SOC_OCV;
+        resp->len = 8U;
+        resp->data[0] = (uint8_t)((bms->soc_permil >> 8U) & 0xFFU);
+        resp->data[1] = (uint8_t)(bms->soc_permil & 0xFFU);
+        resp->data[2] = (uint8_t)((soc_ocv_get_real_soc() >> 8U) & 0xFFU);
+        resp->data[3] = (uint8_t)(soc_ocv_get_real_soc() & 0xFFU);
+        {
+            int32_t mah_scaled = bms->remaining_mah / 100L;
+            resp->data[4] = (uint8_t)(((uint32_t)mah_scaled >> 8U) & 0xFFU);
+            resp->data[5] = (uint8_t)((uint32_t)mah_scaled & 0xFFU);
+        }
+        {
+            int32_t q_max_scaled = soc_ocv_get_q_max() / 100L;
+            resp->data[6] = (uint8_t)(((uint32_t)q_max_scaled >> 8U) & 0xFFU);
+            resp->data[7] = (uint8_t)((uint32_t)q_max_scaled & 0xFFU);
+        }
+        break;
+    }
 }
 
-/* ============================================================
- * 控制处理
- * ============================================================ */
-
-static void can_cmd_handle_control(const can_msg_t *msg)
+/**
+ * @brief  处理控制命令 → 返回 can_action_req_t
+ */
+static can_action_req_t handle_control(const can_msg_t *msg, uint16_t active_faults)
 {
+    can_action_req_t req = { CAN_ACTION_NONE, 0U };
+    if (msg == NULL || msg->len < 1U) { return req; }
+
     uint8_t cmd = msg->data[0];
 
     switch (cmd) {
-        case CAN_CTRL_CLEAR_FAULT:
-            protection_clear_latched();
-            break;
-
-        case CAN_CTRL_FET_CHG_ON:
-            /* 充电 FET 开 — 仅当无过压/过流充电故障 */
-            {
-                const protection_ctx_t *prot = protection_get_ctx();
-                if (prot != NULL && !(prot->active_faults
-                    & (FAULT_CELL_OV | FAULT_PACK_OV | FAULT_CHARGE_OC))) {
-                    /* 安全：具体 FET 控制脚位由 io_ctrl 实现 */
-                }
-            }
-            break;
-
-        case CAN_CTRL_FET_DSG_ON:
-            /* 放电 FET 开 */
-            {
-                const protection_ctx_t *prot = protection_get_ctx();
-                if (prot != NULL && !(prot->active_faults
-                    & (FAULT_CELL_UV | FAULT_PACK_UV
-                       | FAULT_DISCHARGE_OC | FAULT_SHORT_CIRCUIT))) {
-                    /* 安全 */
-                }
-            }
-            break;
-
-        case CAN_CTRL_BALANCE_SET:
-            if (msg->dlc >= 3U) {
-                uint16_t mask = (uint16_t)(((uint16_t)msg->data[1] << 8U)
-                                           | msg->data[2]);
-                bq76940_set_balancing(mask);
-            }
-            break;
-
-        case CAN_CTRL_BALANCE_OFF:
-            bq76940_balance_off();
-            break;
-
-        case CAN_CTRL_SHUTDOWN:
-            bq76940_shutdown();
-            break;
-
-        default:
-            break;
+    case CAN_CTRL_CLEAR_FAULT:
+        req.action = CAN_ACTION_CLEAR_FAULT;
+        break;
+    case CAN_CTRL_FET_CHG_ON:
+        /* 安全条件: 无活跃故障时才允许开启 */
+        if (active_faults == 0x0000U) {
+            req.action = CAN_ACTION_FET_CHG_ON;
+        }
+        break;
+    case CAN_CTRL_FET_CHG_OFF:
+        req.action = CAN_ACTION_FET_CHG_OFF;
+        break;
+    case CAN_CTRL_FET_DSG_ON:
+        if (active_faults == 0x0000U) {
+            req.action = CAN_ACTION_FET_DSG_ON;
+        }
+        break;
+    case CAN_CTRL_FET_DSG_OFF:
+        req.action = CAN_ACTION_FET_DSG_OFF;
+        break;
+    case CAN_CTRL_BALANCE_SET:
+        req.action = CAN_ACTION_BALANCE_SET;
+        if (msg->len >= 3U) {
+            req.balance_mask = (uint16_t)(((uint16_t)msg->data[1] << 8U) | msg->data[2]);
+        }
+        break;
+    case CAN_CTRL_BALANCE_OFF:
+        req.action = CAN_ACTION_BALANCE_OFF;
+        break;
+    case CAN_CTRL_SHUTDOWN:
+        req.action = CAN_ACTION_SHUTDOWN;
+        break;
+    default:
+        break;
     }
+
+    return req;
 }
 
-/* ============================================================
- * 参数配置处理
- * ============================================================ */
-
-static void can_cmd_handle_config(const can_msg_t *msg)
+/**
+ * @brief  处理配置命令 → 更新 settings
+ */
+static void handle_config(const can_msg_t *msg)
 {
-    /* Byte 0: 参数类型, Byte 1-2: 值 (大端) */
-    uint8_t  param = msg->data[0];
-    uint16_t value = (uint16_t)(((uint16_t)msg->data[1] << 8U)
-                                | msg->data[2]);
+    if (msg == NULL || msg->len < 3U) { return; }
 
-    bms_settings_t *s = bms_shared_settings_lock(osWaitForever);
-    if (s == NULL) { return; }
+    uint8_t  param = msg->data[0];
+    uint16_t value = (uint16_t)(((uint16_t)msg->data[1] << 8U) | msg->data[2]);
+
+    bms_settings_t *settings = bms_shared_settings_lock(osWaitForever);
+    if (settings == NULL) { return; }
 
     switch (param) {
-        case 0x01U: s->cell_ov_mv        = value; break;
-        case 0x02U: s->cell_uv_mv        = value; break;
-        case 0x03U: s->discharge_oc_ma   = value; break;
-        case 0x04U: s->charge_oc_ma      = value; break;
-        case 0x05U: s->balance_thresh_mv = value; break;
-        case 0x06U: s->balance_min_mv    = value; break;
-        default: break;
+    case CAN_CFG_CELL_OV_MV:       settings->cell_ov_mv       = value; break;
+    case CAN_CFG_CELL_UV_MV:       settings->cell_uv_mv       = value; break;
+    case CAN_CFG_DISCHARGE_OC_MA:  settings->discharge_oc_ma  = value; break;
+    case CAN_CFG_CHARGE_OC_MA:     settings->charge_oc_ma     = value; break;
+    case CAN_CFG_BALANCE_THRESH_MV: settings->balance_thresh_mv = value; break;
+    case CAN_CFG_BALANCE_MIN_MV:   settings->balance_min_mv   = value; break;
+    default: break;
     }
 
     bms_shared_settings_unlock();
 }
 
-/* ============================================================
- * CAN 上报任务
- * ============================================================ */
-
-void can_tx_task_entry(void *argument)
+can_action_req_t can_cmd_dispatch(const can_msg_t *msg, uint16_t active_faults,
+                                   can_msg_t *resp_frame)
 {
-    (void)argument;
-    uint32_t loop = 0U;
+    can_action_req_t req = { CAN_ACTION_NONE, 0U };
 
-    for (;;) {
-        bms_shared_t *bms = bms_shared_data_lock(osWaitForever);
-        if (bms == NULL) { continue; }
+    if (msg == NULL) { return req; }
 
-        /* 每 100ms: 状态 + 电压 + SOC */
-        can_tx_status(bms);
-        can_tx_cells(bms);
-        can_tx_soc_ocv(bms);
-
-        /* 每 500ms (5 次循环): 故障状态 */
-        if ((loop % 5U) == 0U) {
-            can_tx_protection(bms);
+    switch (msg->id) {
+    case CAN_RX_QUERY: {
+        /* 查询: 生成响应帧写入 resp_frame (非 NULL 时) */
+        if (resp_frame != NULL) {
+            bms_shared_t *bms = bms_shared_data_lock(10U);
+            if (bms != NULL) {
+                handle_query(msg->data[0], bms, resp_frame);
+                bms_shared_data_unlock();
+            }
         }
-
-        bms_shared_data_unlock();
-
-        loop++;
-        osDelay(100U);
+        break;
     }
-}
-
-/* ============================================================
- * CAN 上报函数
- * ============================================================ */
-
-void can_tx_status(const bms_shared_t *bms)
-{
-    can_msg_t msg;
-    msg.id   = CAN_TX_BMS_STATUS;
-    msg.type = CAN_FRAME_STD;
-    msg.fmt  = CAN_FMT_DATA;
-    msg.dlc  = 8U;
-
-    uint32_t total_mv = bms->bq_data.cells.total_mv;
-    int32_t  current  = bms->bq_data.current.current_ma;
-
-    msg.data[0] = (uint8_t)((total_mv >> 8U) & 0xFFU);
-    msg.data[1] = (uint8_t)(total_mv         & 0xFFU);
-    msg.data[2] = (uint8_t)((current  >> 8U) & 0xFFU);
-    msg.data[3] = (uint8_t)(current          & 0xFFU);
-    msg.data[4] = (uint8_t)(bms->soc_permil / 10U);  /* 0-100% */
-    msg.data[5] = (uint8_t)(bms->prot_level);
-    msg.data[6] = (uint8_t)((bms->prot_ctx.active_faults >> 8U) & 0xFFU);
-    msg.data[7] = (uint8_t)(bms->prot_ctx.active_faults        & 0xFFU);
-
-    can_send(&msg);
-}
-
-void can_tx_cells(const bms_shared_t *bms)
-{
-    for (uint8_t grp = 0U; grp < 2U; grp++) {
-        can_msg_t msg;
-        msg.id   = (grp == 0U) ? CAN_TX_CELL_VOLT1 : CAN_TX_CELL_VOLT2;
-        msg.type = CAN_FRAME_STD;
-        msg.fmt  = CAN_FMT_DATA;
-        msg.dlc  = 8U;
-
-        for (uint8_t j = 0U; j < 4U; j++) {
-            uint8_t idx = (uint8_t)(grp * 4U + j);
-            uint16_t mv = (idx < BQ76940_CELL_COUNT)
-                          ? bms->bq_data.cells.cell_mv[idx] : 0U;
-            msg.data[j * 2U]     = (uint8_t)((mv >> 8U) & 0xFFU);
-            msg.data[j * 2U + 1U] = (uint8_t)(mv & 0xFFU);
-        }
-        can_send(&msg);
+    case CAN_RX_CONTROL:
+        req = handle_control(msg, active_faults);
+        break;
+    case CAN_RX_CONFIG:
+        handle_config(msg);
+        break;
+    default:
+        break;
     }
 
-    /* 第 9 个电芯 + 温度放在同一个帧 */
-    can_msg_t msg;
-    msg.id   = CAN_TX_CELL_VOLT2 + 1U;  /* 0x112 */
-    msg.type = CAN_FRAME_STD;
-    msg.fmt  = CAN_FMT_DATA;
-    msg.dlc  = 8U;
-
-    uint16_t v9 = (BQ76940_CELL_COUNT > 8U)
-                  ? bms->bq_data.cells.cell_mv[8U] : 0U;
-    msg.data[0] = (uint8_t)((v9 >> 8U) & 0xFFU);
-    msg.data[1] = (uint8_t)(v9          & 0xFFU);
-    msg.data[2] = (uint8_t)(bms->bq_data.cells.max_mv / 10U);
-    msg.data[3] = (uint8_t)(bms->bq_data.cells.min_mv / 10U);
-    msg.data[4] = (uint8_t)(bms->bq_data.cells.diff_mv / 10U);
-    msg.data[5] = (uint8_t)(bms->bq_data.temps.ts_mdeg_c[0] / 10U);
-    msg.data[6] = (uint8_t)(bms->bq_data.temps.ts_mdeg_c[1] / 10U);
-    msg.data[7] = (uint8_t)(bms->bq_data.temps.ts_mdeg_c[2] / 10U);
-
-    can_send(&msg);
+    return req;
 }
 
-void can_tx_protection(const bms_shared_t *bms)
+/* ============================================================
+ * 周期性 CAN 上报帧生成
+ * ============================================================ */
+
+uint8_t can_pub(const bms_shared_t *bms, can_msg_t *frames)
 {
-    can_msg_t msg;
-    msg.id   = CAN_TX_PROTECTION;
-    msg.type = CAN_FRAME_STD;
-    msg.fmt  = CAN_FMT_DATA;
-    msg.dlc  = 8U;
+    if (bms == NULL || frames == NULL) { return 0U; }
 
-    msg.data[0] = (uint8_t)((bms->prot_ctx.active_faults >> 8U) & 0xFFU);
-    msg.data[1] = (uint8_t)(bms->prot_ctx.active_faults        & 0xFFU);
-    msg.data[2] = (uint8_t)((bms->prot_ctx.latched_faults >> 8U) & 0xFFU);
-    msg.data[3] = (uint8_t)(bms->prot_ctx.latched_faults        & 0xFFU);
-    msg.data[4] = (uint8_t)bms->prot_level;
-    msg.data[5] = (uint8_t)bms->prot_ctx.fet;
-    msg.data[6] = 0x00U;
-    msg.data[7] = 0x00U;
+    const bq76940_cell_data_t *cells = &bms->battery_val.cells;
+    int32_t current_ma = bms->battery_val.current.current_ma;
 
-    can_send(&msg);
-}
+    /* ---- Frame 0: 0x110 CELL_VOLT_1_4 (8 bytes, big-endian) ---- */
+    frames[0].id  = CAN_TX_CELL_VOLT_1_4;
+    frames[0].len = 8U;
+    for (uint8_t i = 0U; i < 4U; i++) {
+        frames[0].data[i * 2U]     = (uint8_t)((cells->cell_mv[i] >> 8U) & 0xFFU);
+        frames[0].data[i * 2U + 1U] = (uint8_t)(cells->cell_mv[i] & 0xFFU);
+    }
 
-void can_tx_soc_ocv(const bms_shared_t *bms)
-{
-    can_msg_t msg;
-    msg.id   = CAN_TX_SOC_OCV;
-    msg.type = CAN_FRAME_STD;
-    msg.fmt  = CAN_FMT_DATA;
-    msg.dlc  = 8U;
+    /* ---- Frame 1: 0x111 CELL_VOLT_5_8 (8 bytes, big-endian) ---- */
+    frames[1].id  = CAN_TX_CELL_VOLT_5_9;
+    frames[1].len = 8U;
+    for (uint8_t i = 4U; i < 8U; i++) {
+        uint8_t idx = i - 4U;
+        frames[1].data[idx * 2U]     = (uint8_t)((cells->cell_mv[i] >> 8U) & 0xFFU);
+        frames[1].data[idx * 2U + 1U] = (uint8_t)(cells->cell_mv[i] & 0xFFU);
+    }
 
-    uint16_t soc  = bms->soc_permil;
-    uint16_t ocv  = bms->ocv_mv;
-    int32_t  rem  = bms->remaining_mah;
+    /* ---- Frame 2: 0x120 BMS_STATUS (8 bytes, big-endian) ---- */
+    frames[2].id  = CAN_TX_STATUS;
+    frames[2].len = 8U;
 
-    msg.data[0] = (uint8_t)((soc >> 8U) & 0xFFU);
-    msg.data[1] = (uint8_t)(soc         & 0xFFU);
-    msg.data[2] = (uint8_t)((ocv >> 8U) & 0xFFU);
-    msg.data[3] = (uint8_t)(ocv         & 0xFFU);
-    msg.data[4] = (uint8_t)((rem >> 24U) & 0xFFU);
-    msg.data[5] = (uint8_t)((rem >> 16U) & 0xFFU);
-    msg.data[6] = (uint8_t)((rem >>  8U) & 0xFFU);
-    msg.data[7] = (uint8_t)(rem          & 0xFFU);
+    uint32_t pack_mv = cells->total_mv;
+    int16_t  current_scaled = (int16_t)(current_ma / 10L);
 
-    can_send(&msg);
+    frames[2].data[0] = (uint8_t)(bms->soc_permil / 10U);
+    frames[2].data[1] = (uint8_t)((pack_mv >> 8U) & 0xFFU);
+    frames[2].data[2] = (uint8_t)(pack_mv & 0xFFU);
+    frames[2].data[3] = (uint8_t)(((uint16_t)current_scaled >> 8U) & 0xFFU);
+    frames[2].data[4] = (uint8_t)((uint16_t)current_scaled & 0xFFU);
+    frames[2].data[5] = (uint8_t)bms->prot_level;
+    /* Cell 9 (index 8) in spare bytes, big-endian */
+    frames[2].data[6] = (uint8_t)((cells->cell_mv[8] >> 8U) & 0xFFU);
+    frames[2].data[7] = (uint8_t)(cells->cell_mv[8] & 0xFFU);
+
+    /* ---- Frame 3: 0x130 SOC_OCV (8 bytes, big-endian) ---- */
+    frames[3].id  = CAN_TX_SOC_OCV;
+    frames[3].len = 8U;
+
+    frames[3].data[0] = (uint8_t)((bms->soc_permil >> 8U) & 0xFFU);
+    frames[3].data[1] = (uint8_t)(bms->soc_permil & 0xFFU);
+    frames[3].data[2] = (uint8_t)((soc_ocv_get_real_soc() >> 8U) & 0xFFU);
+    frames[3].data[3] = (uint8_t)(soc_ocv_get_real_soc() & 0xFFU);
+
+    int32_t mah_scaled = bms->remaining_mah / 100L;
+    frames[3].data[4] = (uint8_t)(((uint32_t)mah_scaled >> 8U) & 0xFFU);
+    frames[3].data[5] = (uint8_t)((uint32_t)mah_scaled & 0xFFU);
+
+    int32_t q_max_scaled = soc_ocv_get_q_max() / 100L;
+    frames[3].data[6] = (uint8_t)(((uint32_t)q_max_scaled >> 8U) & 0xFFU);
+    frames[3].data[7] = (uint8_t)((uint32_t)q_max_scaled & 0xFFU);
+
+    return 4U;
 }

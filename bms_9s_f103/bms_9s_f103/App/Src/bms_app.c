@@ -1,6 +1,6 @@
 /**
  * @file    bms_app.c
- * @brief   BMS 主应用实现 — 初始化 + 所有任务函数
+ * @brief   BMS 主应用 — 6 任务 + 7 同步原语 + 1 ring_buf
  */
 
 #include "bms_app.h"
@@ -11,76 +11,50 @@
 #include "led.h"
 #include "io_ctrl.h"
 #include "i2c_sw.h"
-#include "usart_drv.h"
 #include "can_drv.h"
 #include "timer.h"
 #include "wdg.h"
 #include "bq76940.h"
 #include "protection.h"
-#include "data_report.h"
+#include "ring_buf.h"
 
 /* ============================================================
- * 任务句柄（供调试/监控使用）
+ * 同步原语 (全局 — stm32f1xx_it.c 需要 sem_sample)
  * ============================================================ */
 
-static osThreadId_t task_acq_handle    = NULL;
-static osThreadId_t task_prot_handle   = NULL;
-static osThreadId_t task_soc_handle    = NULL;
-static osThreadId_t task_can_tx_handle = NULL;
-static osThreadId_t task_can_rx_handle = NULL;
-static osThreadId_t task_wdg_handle    = NULL;
+osSemaphoreId_t sem_sample      = NULL;
+static osMutexId_t mutex_iic     = NULL;
+static osMutexId_t mutex_data    = NULL;
+static osMutexId_t mutex_settings = NULL;
+static osMutexId_t mutex_can_tx = NULL;
+static osEventFlagsId_t evt_protect = NULL;
+static osEventFlagsId_t evt_data_ready = NULL;
 
-/* ============================================================
- * 任务属性
- * ============================================================ */
+/* CAN TX 环形缓冲区 */
+#define Q_CAN_TX_DEPTH 24U
+static uint8_t   q_can_tx_buf[Q_CAN_TX_DEPTH * sizeof(can_msg_t)];
+static ring_buf_t q_can_tx;
 
-static const osThreadAttr_t acq_task_attr = {
-    .name       = "acq",
-    .stack_size = 512U * 4U,
-    .priority   = osPriorityNormal,
-};
-
-static const osThreadAttr_t prot_task_attr = {
-    .name       = "prot",
-    .stack_size = 256U * 4U,
-    .priority   = osPriorityAboveNormal,
-};
-
-static const osThreadAttr_t soc_task_attr = {
-    .name       = "soc",
-    .stack_size = 512U * 4U,
-    .priority   = osPriorityNormal,
-};
-
-static const osThreadAttr_t can_tx_task_attr = {
-    .name       = "canTx",
-    .stack_size = 256U * 4U,
-    .priority   = osPriorityNormal,
-};
-
-static const osThreadAttr_t can_rx_task_attr = {
-    .name       = "canRx",
-    .stack_size = 512U * 4U,
-    .priority   = osPriorityHigh,
-};
-
-static const osThreadAttr_t wdg_task_attr = {
-    .name       = "wdg",
-    .stack_size = 128U * 4U,
-    .priority   = osPriorityLow,
-};
+/* 首次数据就绪标记 */
+static uint8_t first_data_ready = 0U;
+/* 上次故障状态 (用于检测 0→非0 和 非0→0) */
+static uint16_t last_active_faults = 0x0000U;
+/* 通信错误计数 */
+static uint8_t comm_err_cnt = 0U;
 
 /* ============================================================
  * 任务函数前向声明
  * ============================================================ */
 
-static void acquisition_task(void *arg);
-static void protection_task(void *arg);
-static void soc_task(void *arg);
-static void watchdog_task(void *arg);
+static void task_sample_entry(void *arg);
+static void task_protect_entry(void *arg);
+static void task_can_rx_entry(void *arg);
+static void task_balance_entry(void *arg);
+static void task_soc_entry(void *arg);
+static void task_can_tx_entry(void *arg);
 
 /* ============================================================
- * bms_app_init — 入口
+ * bms_app_init — 初始化全部模块 + 创建任务
  * ============================================================ */
 
 void bms_app_init(void)
@@ -90,147 +64,351 @@ void bms_app_init(void)
     led_init();
     io_ctrl_init();
     i2c_sw_init();
-    usart_drv_init();
     can_drv_init();
     timer_init();
-
-    /* 启动看门狗 (超时 1000ms) */
     wdg_init(1000U);
 
-    /* ---- 2. 共享数据中心 ---- */
+    /* ---- 2. 创建同步原语 ---- */
+    mutex_iic      = osMutexNew(NULL);
+    mutex_data     = osMutexNew(NULL);
+    mutex_settings = osMutexNew(NULL);
+    mutex_can_tx   = osMutexNew(NULL);
+    sem_sample     = osSemaphoreNew(1U, 0U, NULL);   /* binary, initially 0 */
+    evt_protect    = osEventFlagsNew(NULL);
+    evt_data_ready = osEventFlagsNew(NULL);
+
+    /* ---- 3. CAN TX 环形缓冲区 ---- */
+    ring_buf_init(&q_can_tx, q_can_tx_buf,
+                  (uint16_t)sizeof(can_msg_t), Q_CAN_TX_DEPTH);
+
+    /* ---- 4. App 层初始化 ---- */
     bms_shared_init();
+    bms_shared_set_data_mutex(mutex_data);
+    bms_shared_set_settings_mutex(mutex_settings);
 
-    /* ---- 3. SOC/OCV 模块 ---- */
-    soc_ocv_init(0);  /* 使用默认 20000mAh */
+    soc_ocv_init(0);
 
-    /* ---- 4. BQ76940 初始化 ---- */
-    bq76940_status_t ret = bq76940_init(NULL);
-    if (ret != BQ76940_OK) {
-        /* BQ76940 通信失败 — 红色 LED 常亮 */
-        led_on(LED_ID_2);
-    }
+    bq76940_cfg_t bq_cfg = {
+        .r_sense_mohm    = 4U,
+        .cell_ov_mv      = 4250U,
+        .cell_uv_mv      = 2800U,
+        .discharge_oc_ma = 30000U,
+        .charge_oc_ma    = 15000U,
+    };
+    (void)bq76940_init(&bq_cfg);
 
-    /* ---- 5. 保护模块 ---- */
     protection_init();
-
-    /* ---- 6. 数据上报模块 ---- */
-    data_report_init();
-
-    /* ---- 7. CAN 指令模块（创建消息队列 + 注册回调） ---- */
     can_cmd_init();
 
-    /* ---- 8. 创建 FreeRTOS 任务 ---- */
-    task_can_rx_handle = osThreadNew(can_cmd_task_entry, NULL,
-                                      &can_rx_task_attr);
-    task_prot_handle   = osThreadNew(protection_task, NULL,
-                                      &prot_task_attr);
-    task_acq_handle    = osThreadNew(acquisition_task, NULL,
-                                      &acq_task_attr);
-    task_can_tx_handle = osThreadNew(can_tx_task_entry, NULL,
-                                      &can_tx_task_attr);
-    task_soc_handle    = osThreadNew(soc_task, NULL,
-                                      &soc_task_attr);
-    task_wdg_handle    = osThreadNew(watchdog_task, NULL,
-                                      &wdg_task_attr);
+    /* ---- 5. 创建 6 个任务 ---- */
+    const osThreadAttr_t sample_attr = {
+        .name = "sample", .stack_size = 512U, .priority = osPriorityAboveNormal };
+    const osThreadAttr_t protect_attr = {
+        .name = "protect", .stack_size = 256U, .priority = osPriorityRealtime };
+    const osThreadAttr_t can_rx_attr = {
+        .name = "canRx", .stack_size = 256U, .priority = osPriorityNormal };
+    const osThreadAttr_t balance_attr = {
+        .name = "balance", .stack_size = 256U, .priority = osPriorityBelowNormal };
+    const osThreadAttr_t soc_attr = {
+        .name = "soc", .stack_size = 512U, .priority = osPriorityBelowNormal };
+    const osThreadAttr_t can_tx_attr = {
+        .name = "canTx", .stack_size = 256U, .priority = osPriorityLow };
 
-    /* ---- 9. 绿色 LED 指示初始化完成 ---- */
-    led_on(LED_ID_1);
+    (void)osThreadNew(task_protect_entry, NULL, &protect_attr);
+    (void)osThreadNew(task_sample_entry,  NULL, &sample_attr);
+    (void)osThreadNew(task_can_rx_entry,  NULL, &can_rx_attr);
+    (void)osThreadNew(task_balance_entry, NULL, &balance_attr);
+    (void)osThreadNew(task_soc_entry,     NULL, &soc_attr);
+    (void)osThreadNew(task_can_tx_entry,  NULL, &can_tx_attr);
+
+    led_on();
 }
 
 /* ============================================================
- * 采集任务 (100ms)
+ * task_sample — 数据采集 + 保护预检 (100ms, prio 32)
  * ============================================================ */
 
-static void acquisition_task(void *arg)
+static void task_sample_entry(void *arg)
 {
     (void)arg;
-
-    /* 等待 BQ76940 初始化稳定 */
-    osDelay(200U);
-
     bq76940_data_t data;
 
     for (;;) {
-        /* 读取 BQ76940 全部数据 */
+        osSemaphoreAcquire(sem_sample, osWaitForever);  /* ← TIM2 ISR 唤醒 */
+
+        /* ① 获取 I2C 总线 */
+        osMutexAcquire(mutex_iic, osWaitForever);
         bq76940_status_t ret = bq76940_read_all(&data);
 
-        if (ret == BQ76940_OK) {
-            /* 更新共享数据中心 */
-            bms_shared_update_bq_data(&data);
+        if (ret != BQ76940_OK) {
+            comm_err_cnt++;
+            if (comm_err_cnt >= 3U) {
+                osEventFlagsSet(evt_protect, FAULT_COMM_LOSS);
+            }
+            osMutexRelease(mutex_iic);
+            continue;
         }
-        /* 通信失败时不更新数据，保持旧值 */
+        comm_err_cnt = 0U;
 
-        osDelay(ACQ_TASK_PERIOD_MS);
+        /* ② settings 快照 (零初始化: 锁超时时阈值为 0, 跳过所有检查) */
+        bms_settings_t snapshot;
+        (void)memset(&snapshot, 0, sizeof(snapshot));
+        bms_settings_t *settings = bms_shared_settings_lock(10U);
+        if (settings != NULL) {
+            snapshot = *settings;
+            bms_shared_settings_unlock();
+        }
+
+        /* ③ 获取 data 锁 (嵌套在 iic 内) */
+        osMutexAcquire(mutex_data, osWaitForever);
+
+        /* ④ 写入采集数据 */
+        bms_shared_get_ptr()->battery_val = data;
+
+        /* ⑤ 保护检查 */
+        prot_result_t prot = protection_check(&data, &snapshot);
+
+        /* ⑥ 写入保护结果 */
+        bms_shared_get_ptr()->prot_level    = prot.level;
+        bms_shared_get_ptr()->active_faults = prot.active_faults;
+
+        /* ⑦ 故障通知 */
+        uint16_t current_faults = prot.active_faults;
+        if (current_faults != 0U && current_faults != last_active_faults) {
+            /* 故障进入: set 对应故障位 */
+            osEventFlagsSet(evt_protect, (uint32_t)current_faults);
+        } else if (current_faults == 0U && last_active_faults != 0U) {
+            /* 故障恢复 */
+            osEventFlagsSet(evt_protect, PROT_RECOVERED);
+        }
+        last_active_faults = current_faults;
+
+        /* ⑧ 首次数据就绪 */
+        if (first_data_ready == 0U) {
+            first_data_ready = 1U;
+            osEventFlagsSet(evt_data_ready, 0x01U);
+        }
+
+        osMutexRelease(mutex_data);
+        osMutexRelease(mutex_iic);
     }
 }
 
 /* ============================================================
- * 保护任务 (10ms — 高频检查)
+ * task_protect — 故障响应 (事件驱动, prio 48 = osPriorityRealtime)
  * ============================================================ */
 
-static void protection_task(void *arg)
+static void task_protect_entry(void *arg)
 {
     (void)arg;
-    osDelay(100U);  /* 等待首次采集完成 */
-
-    uint8_t led_fault = 0U;
+    can_msg_t fault_frame;
 
     for (;;) {
-        /* 从共享数据获取最新采集 */
-        bms_shared_t *bms = bms_shared_data_lock(osWaitForever);
-        if (bms == NULL) { osDelay(PROT_TASK_PERIOD_MS); continue; }
+        uint32_t flags = osEventFlagsWait(evt_protect,
+                                           ALL_FAULTS | PROT_RECOVERED,
+                                           osFlagsWaitAny, osWaitForever);
 
-        bq76940_data_t data = bms->bq_data;  /* 本地拷贝 */
-        bms_shared_data_unlock();
+        /* ① 获取 I2C 总线 */
+        osMutexAcquire(mutex_iic, osWaitForever);
 
-        /* 执行保护检查 */
-        prot_level_t level = protection_check(&data);
+        /* ② 读取保护状态 (无需持 mutex_data: sample 已写完并释放) */
+        bms_shared_t *bms = bms_shared_get_ptr();
+        uint16_t faults    = bms->active_faults;
+        prot_level_t level = bms->prot_level;
 
-        /* 更新保护状态 */
-        const protection_ctx_t *ctx = protection_get_ctx();
-        bms_shared_update_protection(ctx, level);
+        uint8_t ctrl2_mask = (uint8_t)(BQ76940_SYS_CTRL2_CHG_FET
+                                       | BQ76940_SYS_CTRL2_DSG_FET);
+        uint8_t ctrl2_val  = 0U;
 
-        /* LED 指示: 故障时红灯闪烁 */
-        if (level >= PROT_LVL_ALERT) {
-            led_fault = (uint8_t)(led_fault ^ 1U);
-            if (led_fault) {
-                led_on(LED_ID_2);
-            } else {
-                led_off(LED_ID_2);
+        if (flags & PROT_RECOVERED) {
+            /* ③ 故障恢复: 全开 FET */
+            ctrl2_val = (uint8_t)(BQ76940_SYS_CTRL2_CHG_FET
+                                  | BQ76940_SYS_CTRL2_DSG_FET);
+        } else if (level >= PROT_LVL_FAULT) {
+            /* ④ 严重故障: 全关 */
+            ctrl2_val = 0U;
+        } else if (level == PROT_LVL_ALERT) {
+            if (faults & (FAULT_CELL_OV | FAULT_PACK_OV | FAULT_CHARGE_OC)) {
+                ctrl2_val = BQ76940_SYS_CTRL2_DSG_FET;  /* 关充电, 保留放电 */
+            } else if (faults & (FAULT_CELL_UV | FAULT_PACK_UV)) {
+                ctrl2_val = BQ76940_SYS_CTRL2_CHG_FET;  /* 关放电, 保留充电 */
             }
-        } else if (level == PROT_LVL_NONE) {
-            led_off(LED_ID_2);
         }
 
-        osDelay(PROT_TASK_PERIOD_MS);
+        bq76940_write_sys_ctrl2(ctrl2_mask, ctrl2_val);
+        osMutexRelease(mutex_iic);
+
+        /* ⑤ 生成故障 CAN 帧 (big-endian) */
+        fault_frame.id  = CAN_TX_BMS_FAULT;
+        fault_frame.len = 8U;
+        fault_frame.data[0] = (uint8_t)level;
+        fault_frame.data[1] = (uint8_t)((faults >> 8U) & 0xFFU);
+        fault_frame.data[2] = (uint8_t)(faults & 0xFFU);
+        fault_frame.data[3] = (uint8_t)((bms->battery_val.cells.max_mv / 10U) & 0xFFU);
+        fault_frame.data[4] = (uint8_t)((bms->battery_val.cells.min_mv / 10U) & 0xFFU);
+        {
+            int16_t i_scaled = (int16_t)(bms->battery_val.current.current_ma / 10L);
+            fault_frame.data[5] = (uint8_t)(((uint16_t)i_scaled >> 8U) & 0xFFU);
+            fault_frame.data[6] = (uint8_t)((uint16_t)i_scaled & 0xFFU);
+        }
+        /* max_temp + 40°C offset */
+        {
+            int16_t max_temp = bms->battery_val.temps.ts_mdeg_c[0];
+            for (uint8_t i = 1U; i < BQ76940_TS_COUNT; i++) {
+                if (bms->battery_val.temps.ts_mdeg_c[i] > max_temp) {
+                    max_temp = bms->battery_val.temps.ts_mdeg_c[i];
+                }
+            }
+            fault_frame.data[7] = (uint8_t)((max_temp / 10) + 40);
+        }
+
+        /* ⑥ 头插优先发送 (持 mutex_can_tx 保护 ring_buf) */
+        osMutexAcquire(mutex_can_tx, osWaitForever);
+        ring_buf_put_front(&q_can_tx, &fault_frame);
+        osMutexRelease(mutex_can_tx);
     }
 }
 
 /* ============================================================
- * SOC / OCV 任务 (1000ms)
+ * task_can_rx — CAN 下行指令处理 (50ms 轮询, prio 24)
  * ============================================================ */
 
-static void soc_task(void *arg)
+static void task_can_rx_entry(void *arg)
 {
     (void)arg;
-    osDelay(500U);  /* 等待采集稳定 */
+    can_msg_t msg;
+
+    for (;;) {
+        osDelay(50U);
+
+        while (can_available() > 0U) {
+            if (can_recv(&msg) != 0U) { continue; }
+
+            bms_shared_t *bms = bms_shared_data_lock(10U);
+            uint16_t faults = (bms != NULL) ? bms->active_faults : 0x0000U;
+            if (bms != NULL) { bms_shared_data_unlock(); }
+
+            can_msg_t resp_frame;
+            (void)memset(&resp_frame, 0, sizeof(resp_frame));
+            can_action_req_t req = can_cmd_dispatch(&msg, faults, &resp_frame);
+
+            /* 查询响应帧立即发送 */
+            if (resp_frame.len > 0U) {
+                can_send(&resp_frame);
+            }
+
+            /* 执行 BSP 操作 (任务层是唯一有权调用 BSP 的代码) */
+            switch (req.action) {
+            case CAN_ACTION_CLEAR_FAULT:
+                bq76940_clear_faults();
+                break;
+            case CAN_ACTION_FET_CHG_ON:
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_FET,
+                                         BQ76940_SYS_CTRL2_CHG_FET);
+                break;
+            case CAN_ACTION_FET_CHG_OFF:
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_FET, 0U);
+                break;
+            case CAN_ACTION_FET_DSG_ON:
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_FET,
+                                         BQ76940_SYS_CTRL2_DSG_FET);
+                break;
+            case CAN_ACTION_FET_DSG_OFF:
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_FET, 0U);
+                break;
+            case CAN_ACTION_BALANCE_SET:
+                osMutexAcquire(mutex_iic, osWaitForever);
+                bq76940_set_balancing(req.balance_mask);
+                osMutexRelease(mutex_iic);
+                break;
+            case CAN_ACTION_BALANCE_OFF:
+                osMutexAcquire(mutex_iic, osWaitForever);
+                bq76940_balance_off();
+                osMutexRelease(mutex_iic);
+                break;
+            case CAN_ACTION_SHUTDOWN:
+                bq76940_shutdown();
+                break;
+            case CAN_ACTION_NONE:
+            default:
+                break;
+            }
+        }
+    }
+}
+
+/* ============================================================
+ * task_balance — 电池均衡 (500ms, prio 16)
+ * ============================================================ */
+
+static void task_balance_entry(void *arg)
+{
+    (void)arg;
+
+    /* 首次阻塞等待数据就绪 */
+    osEventFlagsWait(evt_data_ready, 0x01U, osFlagsWaitAny, 5000U);
+
+    for (;;) {
+        osDelay(500U);
+
+        bms_shared_t *bms = bms_shared_data_lock(10U);
+        if (bms == NULL) { continue; }
+
+        /* 仅无故障时执行均衡 */
+        if (bms->prot_level < PROT_LVL_FAULT) {
+            const bq76940_cell_data_t *cells = &bms->battery_val.cells;
+            uint16_t thresh_mv = bms->settings.balance_thresh_mv;
+
+            if (thresh_mv > 0U && cells->diff_mv > thresh_mv) {
+                /* 压差超阈值: 开启高电压电芯均衡 */
+                uint16_t mask = 0U;
+                for (uint8_t i = 0U; i < 9U; i++) {
+                    if (cells->cell_mv[i] > (cells->min_mv + thresh_mv)) {
+                        mask |= (uint16_t)(1U << i);
+                    }
+                }
+                bms_shared_data_unlock();
+
+                osMutexAcquire(mutex_iic, osWaitForever);
+                bq76940_set_balancing(mask);
+                osMutexRelease(mutex_iic);
+            } else if (cells->diff_mv <= (thresh_mv / 2U)) {
+                /* 压差已缩小: 关闭均衡 */
+                bms_shared_data_unlock();
+
+                osMutexAcquire(mutex_iic, osWaitForever);
+                bq76940_balance_off();
+                osMutexRelease(mutex_iic);
+            } else {
+                bms_shared_data_unlock();
+            }
+        } else {
+            bms_shared_data_unlock();
+        }
+    }
+}
+
+/* ============================================================
+ * task_soc — SOC/OCV 更新 (1000ms, prio 16)
+ * ============================================================ */
+
+static void task_soc_entry(void *arg)
+{
+    (void)arg;
+
+    /* 首次阻塞等待数据就绪 */
+    osEventFlagsWait(evt_data_ready, 0x01U, osFlagsWaitAny, 5000U);
 
     uint32_t last_ms = bsp_tick_get();
 
     for (;;) {
-        bms_shared_t *bms = bms_shared_data_lock(osWaitForever);
-        if (bms == NULL) { osDelay(SOC_TASK_PERIOD_MS); continue; }
+        osDelay(1000U);
 
-        uint16_t  cell_min  = bms->bq_data.cells.min_mv;
-        int32_t   current   = bms->bq_data.current.current_ma;
+        bms_shared_t *bms = bms_shared_data_lock(10U);
+        if (bms == NULL) { continue; }
 
-        /* 取最高温度传感器值 (最热芯 = 最保守的容量估算) */
-        int16_t temp_max = bms->bq_data.temps.ts_mdeg_c[0];
-        for (uint8_t i = 1U; i < BQ76940_TS_COUNT; i++) {
-            if (bms->bq_data.temps.ts_mdeg_c[i] > temp_max) {
-                temp_max = bms->bq_data.temps.ts_mdeg_c[i];
-            }
-        }
+        uint16_t cell_min  = bms->battery_val.cells.min_mv;
+        int32_t  current   = bms->battery_val.current.current_ma;
 
         bms_shared_data_unlock();
 
@@ -238,48 +416,58 @@ static void soc_task(void *arg)
         uint32_t dt_ms = now - last_ms;
         last_ms = now;
 
-        /* 更新 SOC/OCV */
-        soc_ocv_update(cell_min, current, temp_max, dt_ms);
+        /* SOC/OCV 更新 (3 参数, 无 temp_mdeg) */
+        soc_ocv_update(cell_min, current, dt_ms);
 
         /* 写回共享数据 */
         bms_shared_update_soc(soc_ocv_get_soc(),
                               soc_ocv_get_ocv(),
                               soc_ocv_get_remaining_mah());
-
-        osDelay(SOC_TASK_PERIOD_MS);
     }
 }
 
 /* ============================================================
- * 看门狗 + LED 心跳任务 (500ms)
+ * task_can_tx — CAN 上报 + 喂狗 (100ms, prio 8)
  * ============================================================ */
 
-static void watchdog_task(void *arg)
+static void task_can_tx_entry(void *arg)
 {
     (void)arg;
 
-    uint8_t heartbeat = 0U;
-
     for (;;) {
-        /* 喂狗 */
+        osDelay(100U);
+
+        /* 喂狗 (最低优先级任务兼) */
         wdg_kick();
 
-        /* LED 心跳闪烁（正常: 慢闪, 故障: 保护任务控制红灯） */
-        heartbeat = (uint8_t)(heartbeat ^ 1U);
-
-        /* 仅在无故障时绿灯心跳 */
-        bms_shared_t *bms = bms_shared_data_lock(100U);
+        /* 快照拷贝共享数据 */
+        bms_shared_t *bms = bms_shared_data_lock(10U);
         if (bms != NULL) {
-            if (bms->prot_level == PROT_LVL_NONE) {
-                if (heartbeat) {
-                    led_on(LED_ID_1);
-                } else {
-                    led_off(LED_ID_1);
-                }
+            can_msg_t frames[4];
+            uint8_t count = can_pub(bms, frames);
+
+            /* 周期帧尾插入队列 (持 mutex_can_tx 保护) */
+            for (uint8_t i = 0U; i < count; i++) {
+                osMutexAcquire(mutex_can_tx, osWaitForever);
+                ring_buf_put(&q_can_tx, &frames[i]);
+                osMutexRelease(mutex_can_tx);
             }
             bms_shared_data_unlock();
         }
 
-        osDelay(WDG_TASK_PERIOD_MS);
+        /* 发送队列中所有帧 (每帧独立持锁, 允许 protect 帧头插优先) */
+        can_msg_t frame;
+        for (;;) {
+            osMutexAcquire(mutex_can_tx, osWaitForever);
+            uint16_t avail = ring_buf_available(&q_can_tx);
+            uint8_t  ret   = 1U;
+            if (avail > 0U) {
+                ret = ring_buf_get(&q_can_tx, &frame);
+            }
+            osMutexRelease(mutex_can_tx);
+
+            if (avail == 0U || ret != 0U) { break; }
+            can_send(&frame);
+        }
     }
 }

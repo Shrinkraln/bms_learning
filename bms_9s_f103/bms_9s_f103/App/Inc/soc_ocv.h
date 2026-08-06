@@ -1,18 +1,18 @@
 /**
  * @file    soc_ocv.h
- * @brief   SOC / OCV 估算模块
- * @note    算法: 增强型安时积分 + OCV 查表校正
- *          1. 温度补偿容量: C_effective = C_nominal × 系数(T)
- *          2. 动态 OCV 校正: 连续权重 × 静置计时器
- *          3. 电流零漂自估计: EMA + 冻结/超时
- *          4. 上电 OCV 直接初始化
- *          5. OCV-SOC 表 21 点 (5% 间隔)
+ * @brief   SOC / OCV 估算模块 — 四状态机 + Q_max 学习
+ * @note    状态机: IDLE → DISCHARGE/CHARGE → POLARIZATION → IDLE
+ *          - 充/放电期间: 安时积分 (int64_t 中间精度)
+ *          - 极化消除后: OCV 查表修正 (30 分钟等待)
+ *          - Q_max: 深度放电后 EMA 自学习 (α=0.1)
+ *          - SOC 显示: 底部 3% 安全余量映射
+ *          - 零 BSP 依赖, 零 RTOS 依赖 — 纯算法模块
  *
  *          电流符号: current_ma > 0 = 充电, < 0 = 放电
  */
 
-#ifndef __APP_SOC_OCV_H
-#define __APP_SOC_OCV_H
+#ifndef APP_SOC_OCV_H
+#define APP_SOC_OCV_H
 
 #include "stm32f1xx_hal.h"
 
@@ -21,34 +21,70 @@ extern "C" {
 #endif
 
 /* ============================================================
+ * 配置宏
+ * ============================================================ */
+
+#define SOC_DISPLAY_OFFSET      30      /**< 底部隐藏 3% (30‰)              */
+#define SOC_DISPLAY_SCALE       970     /**< 映射分母                        */
+#define Q_MAX_EMA_DIVISOR       10      /**< Q_max EMA 除数 (α=0.1)         */
+#define POLARIZATION_TIME_MS    1800000UL /**< 极化消除时间 (30 分钟)        */
+#define CHARGE_PLATEAU_DELTA_MV 5U      /**< 充电平台 ΔV 阈值 (mV)          */
+#define CHARGE_PLATEAU_WINDOW_MS 300000UL /**< 充电平台检测窗口 (5 分钟)     */
+#define CHARGE_DETECT_CURRENT_MA 200    /**< 充电器接入检测电流 (mA)         */
+#define CHARGE_DETECT_DEBOUNCE_S 10U    /**< 充电器接入去抖时间 (秒)         */
+
+/* ============================================================
  * 类型定义
  * ============================================================ */
 
-/** @brief SOC 估算上下文 */
-typedef struct {
-    uint16_t  soc_permil;       /**< SOC (0-1000 = 0.0%-100.0%)       */
-    uint16_t  ocv_mv;           /**< 当前 OCV 参考值 (mV)             */
-    int32_t   remaining_mah;    /**< 剩余容量 (mAh)                   */
-    int32_t   nominal_mah;      /**< 标称容量 (mAh), 默认 20000      */
-    uint32_t  last_sample_ms;   /**< 上次采样时间戳 (内部)            */
-    uint32_t  rest_timer_ms;    /**< 静置累计时间 (ms)                */
-    int32_t   current_offset_ma;/**< 零漂估计值 (mA)                  */
-    uint32_t  rest_exit_ms;     /**< 退出静置的时间戳 (1h 超时用)    */
-    uint8_t   initialized;      /**< 初始化标记                       */
-} soc_ocv_ctx_t;
-
-/* ============================================================
- * 锂离子 OCV-SOC 曲线
- * ============================================================ */
+/** @brief SOC 状态 */
+typedef enum {
+    SOC_STATE_IDLE          = 0U,
+    SOC_STATE_DISCHARGE     = 1U,
+    SOC_STATE_CHARGE        = 2U,
+    SOC_STATE_POLARIZATION  = 3U,
+} soc_state_t;
 
 /** @brief OCV-SOC 查表条目 */
 typedef struct {
     uint16_t ocv_mv;       /**< 单芯 OCV (mV)     */
-    uint16_t soc_permil;    /**< 对应 SOC (0-1000) */
+    uint16_t soc_permil;   /**< 对应 SOC (0-1000) */
 } ocv_soc_point_t;
 
 /** @brief OCV-SOC 曲线点数 */
 #define SOC_OCV_TABLE_SIZE  21U
+
+/** @brief SOC 估算上下文 (≤64B) */
+typedef struct {
+    /* 输出 */
+    uint16_t     soc_display;       /**< 显示 SOC [0,1000]                  */
+    uint16_t     soc_real;          /**< 真实 SOC [0,1000]                  */
+    uint16_t     ocv_mv;            /**< OCV 参考值 (mV)                    */
+    int32_t      remaining_mah;     /**< 剩余容量 (mAh)                     */
+
+    /* Q_max */
+    int32_t      q_max_mah;         /**< 学习到的满容量 (mAh)               */
+    int32_t      q_passed_mah;      /**< 本周期累计电量 (mAh)               */
+
+    /* 状态机 */
+    uint8_t      state;             /**< soc_state_t, 显式 uint8 压缩       */
+    uint16_t     idle_baseline_mv;  /**< IDLE 基准电压 (仅 POL→IDLE 更新)   */
+    uint16_t     pol_entry_mv;      /**< 进入 POL 时的 cell_min (mV)        */
+    uint16_t     soc_at_entry;      /**< 进入充/放时的 SOC (‰)              */
+    uint32_t     polarization_ms;   /**< 极化计时器 (ms)                    */
+    uint8_t      from_discharge;    /**< 0=充电周期, 1=放电周期             */
+
+    /* Q_max 学习历史 */
+    uint16_t     last_soc_end;      /**< 充放结束时的 SOC (‰)               */
+    int32_t      last_q_passed;     /**< 充放周期的累计电量 (mAh)           */
+
+    /* 充电平台检测 (5min 滑动窗口) */
+    uint16_t     charge_peak_mv;    /**< 窗口内最高电压 (mV)                */
+    uint16_t     charge_valley_mv;  /**< 窗口内最低电压 (mV)                */
+    uint32_t     charge_window_ms;  /**< 窗口累计时间 (ms)                  */
+
+    uint8_t      initialized;       /**< 初始化标记                         */
+} soc_ctx_t;
 
 /* ============================================================
  * API 函数
@@ -61,45 +97,40 @@ typedef struct {
 void soc_ocv_init(int32_t nominal_mah);
 
 /**
- * @brief  执行一次 SOC/OCV 更新
- * @note   每 1 秒调用一次
+ * @brief  执行一次 SOC/OCV 更新 (四状态机)
+ * @note   每 ~1 秒调用一次
  * @param  cell_min_mv   最低单芯电压 (mV)
  * @param  current_ma    当前电流 (mA), 正=充电, 负=放电
- * @param  temp_mdeg     电池温度 (0.1°C), 取最高温度传感器值
  * @param  dt_ms         距上次调用的时间 (ms)
  */
-void soc_ocv_update(uint16_t cell_min_mv, int32_t current_ma,
-                     int16_t temp_mdeg, uint32_t dt_ms);
+void soc_ocv_update(uint16_t cell_min_mv, int32_t current_ma, uint32_t dt_ms);
 
-/**
- * @brief  获取当前 SOC (0-1000)
- */
+/** @brief 获取映射后显示 SOC (0-1000), 底部 3% 隐藏 */
 uint16_t soc_ocv_get_soc(void);
 
-/**
- * @brief  获取当前 OCV 估算 (mV, 单芯)
- */
+/** @brief 获取真实 SOC (0-1000) */
+uint16_t soc_ocv_get_real_soc(void);
+
+/** @brief 获取当前 OCV 估算 (mV, 单芯) */
 uint16_t soc_ocv_get_ocv(void);
 
-/**
- * @brief  获取剩余容量 (mAh)
- */
+/** @brief 获取剩余容量 (mAh) */
 int32_t soc_ocv_get_remaining_mah(void);
 
-/**
- * @brief  获取 SOC/OCV 上下文（调试用）
- */
-const soc_ocv_ctx_t *soc_ocv_get_ctx(void);
+/** @brief 获取当前状态 */
+soc_state_t soc_ocv_get_state(void);
 
-/**
- * @brief  OCV → SOC 查表 (线性插值)
- * @param  ocv_mv  单芯 OCV (mV)
- * @retval SOC (0-1000)
- */
+/** @brief 获取学习到的 Q_max (mAh) */
+int32_t soc_ocv_get_q_max(void);
+
+/** @brief 获取 SOC/OCV 上下文（调试用） */
+const soc_ctx_t *soc_ocv_get_ctx(void);
+
+/** @brief OCV → SOC 查表 (线性插值) */
 uint16_t soc_ocv_lookup(uint16_t ocv_mv);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __APP_SOC_OCV_H */
+#endif /* APP_SOC_OCV_H */

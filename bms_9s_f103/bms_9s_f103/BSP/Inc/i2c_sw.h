@@ -8,8 +8,8 @@
  *          - 所有函数为阻塞式，适用于 FreeRTOS 任务上下文
  */
 
-#ifndef __BSP_I2C_SW_H
-#define __BSP_I2C_SW_H
+#ifndef BSP_I2C_SW_H
+#define BSP_I2C_SW_H
 
 #include "stm32f1xx_hal.h"
 #include "main.h"
@@ -144,4 +144,4 @@ i2c_sw_status_t i2c_sw_read_crc(uint8_t dev_addr, uint8_t reg, uint8_t *data);
 }
 #endif
 
-#endif /* __BSP_I2C_SW_H */
+#endif /* BSP_I2C_SW_H */

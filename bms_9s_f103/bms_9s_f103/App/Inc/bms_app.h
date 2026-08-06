@@ -1,28 +1,22 @@
 /**
  * @file    bms_app.h
- * @brief   BMS 主应用 — 多任务创建和协调
- * @note    FreeRTOS 任务架构:
+ * @brief   BMS 主应用 — 6 任务事件驱动架构
  *
- *          ┌─────────────────────────────────────────────────────┐
- *          │ Task              Priority      Period     Stack    │
- *          ├─────────────────────────────────────────────────────┤
- *          │ can_rx_task       osPriorityHigh    事件驱动  512w  │
- *          │ protection_task   osPriorityAboveNormal 10ms  256w │
- *          │ acquisition_task  osPriorityNormal    100ms  512w  │
- *          │ can_tx_task       osPriorityNormal    100ms  256w  │
- *          │ soc_task          osPriorityNormal   1000ms  512w  │
- *          │ watchdog_task     osPriorityLow       500ms  128w  │
- *          └─────────────────────────────────────────────────────┘
- *
- *          数据流:
- *          acquisition_task → [bms_shared] → can_tx_task → CAN
- *          acquisition_task → [bms_shared] → protection_task → FET/io_ctrl
- *          acquisition_task → [bms_shared] → soc_task → [bms_shared]
- *          CAN IRX → can_rx_task → 指令分发 → FET/均衡/参数/查询
+ *          任务:
+ *          ┌────────────────┬──────────────┬──────────┬────────┬──────────────────────┐
+ *          │ Task           │ CMSIS Prio   │ Period   │ Stack  │ Trigger              │
+ *          ├────────────────┼──────────────┼──────────┼────────┼──────────────────────┤
+ *          │ task_protect   │ Realtime(48) │ event    │ 1024B  │ EventFlagsWait       │
+ *          │ task_sample    │ AboveNormal  │ 100ms    │ 2048B  │ Semaphore ← TIM2 ISR │
+ *          │ task_can_rx    │ Normal(24)   │ 50ms     │ 1024B  │ osDelay polling      │
+ *          │ task_balance   │ BelowNormal  │ 500ms    │ 1024B  │ DATA_READY → Delay   │
+ *          │ task_soc       │ BelowNormal  │ 1000ms   │ 2048B  │ DATA_READY → Delay   │
+ *          │ task_can_tx    │ Low(8)       │ 100ms    │ 1024B  │ osDelay + wdg_kick   │
+ *          └────────────────┴──────────────┴──────────┴────────┴──────────────────────┘
  */
 
-#ifndef __APP_BMS_APP_H
-#define __APP_BMS_APP_H
+#ifndef APP_BMS_APP_H
+#define APP_BMS_APP_H
 
 #include "stm32f1xx_hal.h"
 #include "cmsis_os.h"
@@ -31,29 +25,17 @@
 extern "C" {
 #endif
 
-/* ============================================================
- * 任务配置
- * ============================================================ */
+/* 同步原语 — ISR/stm32f1xx_it.c 需要访问 */
+extern osSemaphoreId_t sem_sample;
 
-#define ACQ_TASK_PERIOD_MS      100U
-#define PROT_TASK_PERIOD_MS      10U
-#define SOC_TASK_PERIOD_MS     1000U
-#define CAN_TX_PERIOD_MS        100U
-#define WDG_TASK_PERIOD_MS      500U
+/* 故障掩码 */
+#define ALL_FAULTS      0x0FFFU
+#define PROT_RECOVERED  0x0001U
 
-/* ============================================================
- * API 函数
- * ============================================================ */
-
-/**
- * @brief  BMS 应用初始化
- * @note   初始化所有模块并创建 FreeRTOS 任务
- *         在 main.c 中 MX_FREERTOS_Init() 之前调用
- */
 void bms_app_init(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __APP_BMS_APP_H */
+#endif /* APP_BMS_APP_H */

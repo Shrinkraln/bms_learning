@@ -73,9 +73,6 @@ set(BSP_Src
     # ---- Step 10: 软件 I2C + CRC8 ----
     BSP/Src/i2c_sw.c
 
-    # ---- Step 11: 串口驱动 (USART1 + USART2) ----
-    BSP/Src/usart_drv.c
-
     # ---- Step 12: BQ76940 驱动核心 ----
     BSP/Src/bq76940.c
 
@@ -105,7 +102,6 @@ set(App_Include_Dirs
 set(App_Src
     # ---- Step 15: 应用层 ----
     App/Src/protection.c
-    App/Src/data_report.c
     App/Src/bms_app.c
     App/Src/bms_shared.c
     App/Src/soc_ocv.c

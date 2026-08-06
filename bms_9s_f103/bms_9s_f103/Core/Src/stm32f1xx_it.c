@@ -22,6 +22,8 @@
 #include "stm32f1xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "cmsis_os.h"
+#include "bms_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,6 +44,14 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
 
+/* ---- 故障诊断 (.noinit 段: 复位后不初始化) ---- */
+__attribute__((section(".noinit"))) static uint32_t fault_signature;
+__attribute__((section(".noinit"))) static uint32_t fault_type;     /* 0=Hard,1=Mem,2=Bus,3=Usage */
+__attribute__((section(".noinit"))) static uint32_t fault_cfsr;
+__attribute__((section(".noinit"))) static uint32_t fault_hfsr;
+__attribute__((section(".noinit"))) static uint32_t fault_mmfar;
+__attribute__((section(".noinit"))) static uint32_t fault_bfar;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -57,7 +67,6 @@
 /* External variables --------------------------------------------------------*/
 extern CAN_HandleTypeDef hcan;
 extern TIM_HandleTypeDef htim2;
-extern UART_HandleTypeDef huart1;
 extern TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN EV */
@@ -88,7 +97,12 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  fault_type      = 0U;
+  fault_cfsr      = SCB->CFSR;
+  fault_hfsr      = SCB->HFSR;
+  fault_mmfar     = SCB->MMFAR;
+  fault_bfar      = SCB->BFAR;
+  fault_signature = 0xDEADBEEFU;
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -103,7 +117,12 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  fault_type      = 1U;
+  fault_cfsr      = SCB->CFSR;
+  fault_hfsr      = SCB->HFSR;
+  fault_mmfar     = SCB->MMFAR;
+  fault_bfar      = SCB->BFAR;
+  fault_signature = 0xDEADBEEFU;
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -118,7 +137,12 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  fault_type      = 2U;
+  fault_cfsr      = SCB->CFSR;
+  fault_hfsr      = SCB->HFSR;
+  fault_mmfar     = SCB->MMFAR;
+  fault_bfar      = SCB->BFAR;
+  fault_signature = 0xDEADBEEFU;
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -133,7 +157,12 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  fault_type      = 3U;
+  fault_cfsr      = SCB->CFSR;
+  fault_hfsr      = SCB->HFSR;
+  fault_mmfar     = SCB->MMFAR;
+  fault_bfar      = SCB->BFAR;
+  fault_signature = 0xDEADBEEFU;
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {
@@ -200,22 +229,10 @@ void TIM2_IRQHandler(void)
   /* USER CODE END TIM2_IRQn 0 */
   HAL_TIM_IRQHandler(&htim2);
   /* USER CODE BEGIN TIM2_IRQn 1 */
-
+  if (sem_sample != NULL) {
+      osSemaphoreRelease(sem_sample);
+  }
   /* USER CODE END TIM2_IRQn 1 */
-}
-
-/**
-  * @brief This function handles USART1 global interrupt.
-  */
-void USART1_IRQHandler(void)
-{
-  /* USER CODE BEGIN USART1_IRQn 0 */
-
-  /* USER CODE END USART1_IRQn 0 */
-  HAL_UART_IRQHandler(&huart1);
-  /* USER CODE BEGIN USART1_IRQn 1 */
-
-  /* USER CODE END USART1_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */
