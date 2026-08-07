@@ -2,7 +2,7 @@
 spec_dev:
   version: 1
   feature: afe-disconnect-can-report
-  status: draft
+  status: active
   covers:
     - "bms_9s_f103/App/Src/bms_app.c"
     - "bms_9s_f103/App/Src/can_cmd.c"

@@ -35,12 +35,14 @@ void CanWorker::start(const QString &plugin, const QString &interface, int bitra
         return;
     }
 
+    m_timedOut = false;
     m_timeoutTimer->start();
     emit connectionStatusChanged(true);
 }
 
 void CanWorker::stop()
 {
+    m_timedOut = false;
     m_timeoutTimer->stop();
     if (m_device) {
         m_device->disconnectDevice();
@@ -69,6 +71,10 @@ void CanWorker::onFramesReceived()
     }
     if (!batch.isEmpty()) {
         m_timeoutTimer->start(); // 重置超时计时器
+        if (m_timedOut) {
+            m_timedOut = false;
+            emit connectionStatusChanged(true);
+        }
         emit batchReady(batch);
     }
 }
@@ -83,6 +89,7 @@ void CanWorker::onErrorOccurred(QCanBusDevice::CanBusError error)
 
 void CanWorker::checkTimeout()
 {
+    m_timedOut = true;
     m_timeoutTimer->stop();
     emit connectionStatusChanged(false);
     emit errorOccurred("CAN frame timeout (>500ms)");

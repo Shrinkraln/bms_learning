@@ -293,9 +293,11 @@ uint8_t can_pub(const bms_shared_t *bms, can_msg_t *frames)
         extern uint8_t g_fet_chg_on;    /* 定义在 bms_app.c */
         extern uint8_t g_fet_dsg_on;
         extern uint8_t g_balancing_active;
+        extern uint8_t g_afe_online;
         if (g_fet_chg_on)  { ctrl |= (1U << 2U); }
         if (g_fet_dsg_on)  { ctrl |= (1U << 3U); }
         if (g_balancing_active) { ctrl |= (1U << 4U); }
+        if (g_afe_online)  { ctrl |= CAN_STATUS_AFE_ONLINE; }
         frames[2].data[5] = ctrl;
     }
     /* Cell 9 (index 8) in spare bytes, big-endian */

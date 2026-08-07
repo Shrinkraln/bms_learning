@@ -31,6 +31,7 @@ struct BmsSnapshot {
     bool balancing = false;
     // 元数据
     bool connection_alive = true;
+    bool afe_online = true;     /**< AFE 在线: true=正常响应, false=离线 (0x120 ctrl bit5) */
     QDateTime timestamp;
 };
 

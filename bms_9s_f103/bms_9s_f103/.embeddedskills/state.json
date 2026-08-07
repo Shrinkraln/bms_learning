@@ -1,0 +1,22 @@
+{
+  "last_build": {
+    "provider": "gcc",
+    "action": "build",
+    "project": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103",
+    "preset": "Debug",
+    "log_dir": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\.embeddedskills\\build",
+    "artifacts": {
+      "build_dir": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug",
+      "elf_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+      "debug_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+      "flash_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+      "log_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\.embeddedskills\\build\\bms_9s_f103-Debug-build.log"
+    },
+    "build_dir": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug",
+    "elf_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+    "debug_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+    "flash_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+    "log_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\.embeddedskills\\build\\bms_9s_f103-Debug-build.log",
+    "timestamp": "2026-07-29T06:53:34+00:00"
+  }
+}

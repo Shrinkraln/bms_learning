@@ -87,6 +87,19 @@ void BmsDataModel::applySnapshot(const BmsSnapshot &snap)
     // CSV
     if (m_csvLogger) { m_csvLogger->appendRow(snap); }
 
+    // AFE 在线状态 → 连接显示
+    if (!snap.afe_online && m_connStatus == CONNECTED) {
+        m_connStatus = DISCONNECTED;
+        m_statusText = QString::fromUtf8("⚠ 电池未接入");
+        emit connectionStatusChanged();
+        emit statusTextChanged(m_statusText);
+    } else if (snap.afe_online && m_connStatus == DISCONNECTED && !m_shutdownSent) {
+        m_connStatus = CONNECTED;
+        m_statusText = QString::fromUtf8("● 已连接");
+        emit connectionStatusChanged();
+        emit statusTextChanged(m_statusText);
+    }
+
     // 时间戳
     m_lastUpdate = snap.timestamp.toString("HH:mm:ss");
     emit lastUpdateChanged(m_lastUpdate);

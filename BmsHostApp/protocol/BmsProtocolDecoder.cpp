@@ -114,6 +114,7 @@ BmsSnapshot BmsProtocolDecoder::decodeStatusFrame(const CanFrame &f)
     s.fet_chg    = (ctrl >> 2U) & 0x01U;
     s.fet_dsg    = (ctrl >> 3U) & 0x01U;
     s.balancing  = (ctrl >> 4U) & 0x01U;
+    s.afe_online = (ctrl >> 5U) & 0x01U;
     // C9 voltage
     s.cell_mv[8] = (static_cast<quint16>(f.data[6]) << 8) | f.data[7];
     return s;

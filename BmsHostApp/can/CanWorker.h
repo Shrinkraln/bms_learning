@@ -32,6 +32,7 @@ private slots:
 private:
     QCanBusDevice *m_device = nullptr;
     QTimer *m_timeoutTimer;
+    bool m_timedOut = false;
     static constexpr int TIMEOUT_MS = 500;
 };
 

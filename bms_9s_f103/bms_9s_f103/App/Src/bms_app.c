@@ -46,6 +46,7 @@ static uint8_t comm_err_cnt = 0U;
 uint8_t g_fet_chg_on       = 1U;
 uint8_t g_fet_dsg_on       = 1U;
 uint8_t g_balancing_active = 0U;
+uint8_t g_afe_online       = 0U;  /**< AFE 在线标志: 1=正常, 0=离线/I2C失败 */
 
 /* ============================================================
  * 任务函数前向声明
@@ -149,11 +150,13 @@ static void task_sample_entry(void *arg)
             comm_err_cnt++;
             if (comm_err_cnt >= 3U) {
                 osEventFlagsSet(evt_protect, FAULT_COMM_LOSS);
+                g_afe_online = 0U;
             }
             osMutexRelease(mutex_iic);
             continue;
         }
         comm_err_cnt = 0U;
+        g_afe_online = 1U;
 
         /* ② settings 快照 (零初始化: 锁超时时阈值为 0, 跳过所有检查) */
         bms_settings_t snapshot;
