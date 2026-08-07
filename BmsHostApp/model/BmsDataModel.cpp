@@ -1,5 +1,6 @@
 #include "BmsDataModel.h"
 #include <QDateTime>
+#include <QMetaObject>
 
 BmsDataModel::BmsDataModel(QObject *parent) : QObject(parent)
 {
@@ -113,8 +114,9 @@ void BmsDataModel::applySnapshot(const BmsSnapshot &snap)
 void BmsDataModel::sendQuery(quint8 subCmd)
 {
     if (m_canWorker) {
-        m_canWorker->sendFrame(
-            BmsProtocolDecoder::encodeCommand({BmsCommand::QUERY, subCmd, 0}));
+        CanFrame frame = BmsProtocolDecoder::encodeCommand({BmsCommand::QUERY, subCmd, 0});
+        QMetaObject::invokeMethod(m_canWorker, "sendFrame", Qt::QueuedConnection,
+                                  Q_ARG(CanFrame, frame));
     }
 }
 
@@ -122,16 +124,18 @@ void BmsDataModel::sendControl(quint8 cmd, quint16 mask)
 {
     if (m_canWorker) {
         if (cmd == 0xFF) m_shutdownSent = true;
-        m_canWorker->sendFrame(
-            BmsProtocolDecoder::encodeCommand({BmsCommand::CONTROL, cmd, mask}));
+        CanFrame frame = BmsProtocolDecoder::encodeCommand({BmsCommand::CONTROL, cmd, mask});
+        QMetaObject::invokeMethod(m_canWorker, "sendFrame", Qt::QueuedConnection,
+                                  Q_ARG(CanFrame, frame));
     }
 }
 
 void BmsDataModel::sendConfig(quint8 param, quint16 value)
 {
     if (m_canWorker) {
-        m_canWorker->sendFrame(
-            BmsProtocolDecoder::encodeCommand({BmsCommand::CONFIG, param, value}));
+        CanFrame frame = BmsProtocolDecoder::encodeCommand({BmsCommand::CONFIG, param, value});
+        QMetaObject::invokeMethod(m_canWorker, "sendFrame", Qt::QueuedConnection,
+                                  Q_ARG(CanFrame, frame));
     }
 }
 

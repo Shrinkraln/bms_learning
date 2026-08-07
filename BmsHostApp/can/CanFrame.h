@@ -3,6 +3,7 @@
 
 #include <QtSerialBus/QCanBusFrame>
 #include <QtCore/QtGlobal>
+#include <QMetaType>
 
 struct CanFrame {
     quint32 id = 0;
@@ -25,5 +26,7 @@ struct CanFrame {
         return f;
     }
 };
+
+Q_DECLARE_METATYPE(CanFrame)
 
 #endif // CAN_FRAME_H

@@ -93,6 +93,7 @@ Page {
 
     function appendSample() {
         if (root.paused) return
+        if (bms.connectionStatus !== 1) return  // 无数据时跳过，防止零值点无限累积
         var t = root.elapsed++
         seriesVoltage.append(t, bms.packVoltage / 1000.0)
         seriesCurrent.append(t, bms.packCurrent / 1000.0)
