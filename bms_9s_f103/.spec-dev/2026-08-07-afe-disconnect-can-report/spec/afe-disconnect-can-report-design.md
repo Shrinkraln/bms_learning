@@ -9,6 +9,7 @@ spec_dev:
     - "bms_9s_f103/App/Inc/can_cmd.h"
     - "BmsHostApp/protocol/BmsSnapshot.h"
     - "BmsHostApp/protocol/BmsProtocolDecoder.cpp"
+    - "BmsHostApp/can/CanWorker.h"
     - "BmsHostApp/can/CanWorker.cpp"
     - "BmsHostApp/model/BmsDataModel.cpp"
   sync_commit: null
@@ -22,9 +23,9 @@ spec_dev:
 
 **目标**：在 0x120 STATUS 帧中增加 AFE 在线标志位，固件据此上报 AFE 连接状态；上位机解析后显示"电池未接入"；修复重连 bug。
 
-**成功标准**：
-1. 拔掉 BQ76940 I2C 线后，上位机 300ms 内显示"⚠ 电池未接入"
-2. 重新接上 I2C 线后，上位机 100ms 内恢复"● 已连接"
+**成功标准**（典型值，受 100ms 采样周期 + CAN 上报周期 + 30ms 渲染影响）：
+1. 拔掉 BQ76940 I2C 线后，上位机 ≤500ms 内显示"⚠ 电池未接入"
+2. 重新接上 I2C 线后，上位机 ≤250ms 内恢复"● 已连接"
 3. 拔掉 CAN 线后上位机显示"⚠ 已断开"，重新接上后自动恢复"● 已连接"
 
 ## 非目标
@@ -186,13 +187,13 @@ BmsDataModel::applySnapshot()
 - `CAN_STATUS_AFE_ONLINE` (`1U << 5U`)：宏定义，`can_cmd.h`
 
 **上位机端**：
-- `BmsSnapshot::afe_online` (`bool`)：新增字段，默认 `true`（向后兼容旧固件）
+- `BmsSnapshot::afe_online` (`bool`)：新增字段，默认 `true`（用于从未收到 0x120 帧的路径，如仅收到故障帧时保持乐观）
 - `CanWorker::m_timedOut` (`bool`)：新增成员，追踪超时状态
 
 ### 错误处理
 
-- **AFE 离线 + CAN 超时同时发生**：CAN 超时优先（statusText="⚠ 已断开"），帧恢复后若 AFE 仍离线则切换到"⚠ 电池未接入"
-- **旧版固件（无 bit5）**：上位机默认 `afe_online=true`，行为不变——向后兼容
+- **AFE 离线 + CAN 超时同时发生**：CAN 超时优先（statusText="⚠ 已断开"）。帧恢复后，`CanWorker` 先 emit `connectionStatusChanged(true)`（此时 model 可能短暂显示"● 已连接"），随后下一批快照到达时 `applySnapshot` 依据 `afe_online=false` 立即纠正为"⚠ 电池未接入"——两个信号之间最多间隔 30ms（model timer）+ 100ms（CAN 周期），中间态用户不可见。
+- **旧版固件（无 bit5）**：旧固件 ctrl 字节 bit5 恒为 0，若上位机单独升级会误显示"⚠ 电池未接入"。固件与上位机须同步发布，不保证跨版本兼容。
 - **I2C 探针调用失败**：不影响——使用缓存 `g_afe_online`，不直接调用 `bq76940_is_online()`
 
 ---
@@ -215,6 +216,7 @@ BmsDataModel::applySnapshot()
 
 - **固件未初始化时 g_afe_online=0**：初始值为 0，BQ76940 初始化成功前上位机将显示"⚠ 电池未接入"——符合预期，初始化通常在 500ms 内完成
 - **AFE 快速插拔抖动**：AFE 恢复无去抖，可能在边界条件下快速切换状态文本——UI 层面每 30ms 更新一次，人眼可接受
+- **控制按钮联动禁用**：AFE 离线时 `connectionStatus = DISCONNECTED`，`ControlPanel.qml` 和 `ConfigDialog.qml` 中所有按钮 `enabled: bms.connectionStatus === 1` 将自动禁用（FET 控制、均衡、配置、查询）。此为预期行为——电池监视器离线时不应下发控制指令。关机按钮不受此限制（始终可用）。
 - **BmsHostApp 未连接 CAN 设备时**：不进入 applySnapshot 路径，状态保持初始值"⚠ 已断开"，不受影响
 
 ## 开放问题
