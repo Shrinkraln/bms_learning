@@ -42,7 +42,7 @@ Dialog {
         Button {
             text: "发送配置"
             Layout.alignment: Qt.AlignRight
-            enabled: bms.connectionStatus === 1
+            enabled: bms.canBusConnected
             onClicked: {
                 var sent = 0
                 for (var i = 0; i < root.params.length; i++) {

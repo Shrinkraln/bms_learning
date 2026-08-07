@@ -24,6 +24,11 @@ void BmsDataModel::onBatchReady(const QVector<CanFrame> &batch)
 
 void BmsDataModel::onConnectionChanged(bool connected)
 {
+    if (m_canBusConnected != connected) {
+        m_canBusConnected = connected;
+        emit canBusConnectedChanged();
+    }
+
     if (m_shutdownSent && !connected) {
         m_connStatus = SHUTDOWN;
     } else {

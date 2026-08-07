@@ -62,10 +62,10 @@ Drawer {
                          enabled: bms.connectionStatus === 1
                          onClicked: bms.sendControl(0x01, 0) }
                 Button { text: "刷新数据"; Layout.fillWidth: true
-                         enabled: bms.connectionStatus === 1
+                         enabled: bms.canBusConnected
                          onClicked: bms.sendQuery(0x00) }
                 Button { text: "参数配置"; Layout.fillWidth: true
-                         enabled: bms.connectionStatus === 1
+                         enabled: bms.canBusConnected
                          onClicked: {
                              root.close()
                              if (root.configDialog) root.configDialog.open()

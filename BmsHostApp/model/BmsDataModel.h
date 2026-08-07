@@ -30,6 +30,7 @@ class BmsDataModel : public QObject {
     Q_PROPERTY(bool fetDischarge READ fetDischarge NOTIFY fetDischargeChanged)
     Q_PROPERTY(bool balancing READ balancing NOTIFY balancingChanged)
     Q_PROPERTY(int connectionStatus READ connectionStatus NOTIFY connectionStatusChanged)
+    Q_PROPERTY(bool canBusConnected READ canBusConnected NOTIFY canBusConnectedChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusTextChanged)
     Q_PROPERTY(QString lastUpdate READ lastUpdate NOTIFY lastUpdateChanged)
     Q_PROPERTY(qreal avgTempC READ avgTempC NOTIFY avgTempCChanged)
@@ -60,6 +61,7 @@ public:
     bool fetDischarge() const { return m_snap.fet_dsg; }
     bool balancing() const { return m_snap.balancing; }
     int connectionStatus() const { return m_connStatus; }
+    bool canBusConnected() const { return m_canBusConnected; }
     QString statusText() const { return m_statusText; }
     QString lastUpdate() const { return m_lastUpdate; }
     qreal avgTempC() const { return m_avgTempC; }
@@ -89,6 +91,7 @@ signals:
     void cellMinChanged(); void cellMaxChanged(); void cellDiffChanged();
     void fetChargeChanged(); void fetDischargeChanged(); void balancingChanged();
     void connectionStatusChanged();
+    void canBusConnectedChanged();
     void lastUpdateChanged(const QString &text);
     void statusTextChanged(const QString &text);
     void avgTempCChanged();
@@ -98,6 +101,7 @@ private:
 
     BmsSnapshot m_snap;
     int m_connStatus = DISCONNECTED;
+    bool m_canBusConnected = false;
     QString m_statusText = "⚠ 已断开";
     QString m_lastUpdate = "--";
     qreal m_avgTempC = 0.0;
