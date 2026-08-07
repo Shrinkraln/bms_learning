@@ -16,10 +16,17 @@ bms_ping.py — CAN 通道验证脚本
 """
 
 import argparse
+import io
+import os
 import struct
 import sys
 import time
 from typing import Optional
+
+# ---- Windows GBK 终端兼容: 强制 stdout 使用 UTF-8 ----
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 try:
     import can
@@ -168,8 +175,13 @@ def decode_fault_frame(data: bytes) -> dict:
 
 def list_interfaces():
     """列出可用的 CAN 接口"""
-    print("🔍 扫描可用 CAN 接口...")
-    configs = can.detect_available_configs()
+    print("[SCAN] 扫描可用 CAN 接口...")
+    try:
+        configs = can.detect_available_configs()
+    except Exception as e:
+        print(f"   扫描失败: {e}")
+        print("   (PCAN 驱动可能未安装, 或没有 CAN 硬件)")
+        return []
     if not configs:
         print("   未检测到 CAN 接口 (请检查驱动/USB 连接)")
         return []
@@ -188,11 +200,11 @@ def open_can(interface: str, channel: str, bitrate: int) -> Optional[can.Bus]:
         )
         return bus
     except can.exceptions.CanInterfaceNotImplementedError:
-        print(f"   ❌ 不支持的 CAN 接口类型: {interface}")
+        print(f"   [NG] 不支持的 CAN 接口类型: {interface}")
         print(f"   已安装接口: {[c['interface'] for c in can.detect_available_configs()]}")
         return None
     except Exception as e:
-        print(f"   ❌ 无法打开 CAN 设备: {e}")
+        print(f"   [NG] 无法打开 CAN 设备: {e}")
         return None
 
 
@@ -208,10 +220,10 @@ def send_query(bus: can.Bus, sub_cmd: int) -> bool:
         sub_names = {0x00: "QUERY_ALL", 0x01: "QUERY_STATUS", 0x02: "QUERY_CELLS",
                      0x03: "QUERY_PROTECTION", 0x04: "QUERY_SOC"}
         name = sub_names.get(sub_cmd, f"0x{sub_cmd:02X}")
-        print(f"📤 发送 PING: CAN ID=0x{CAN_ID_QUERY:03X}  data=[{sub_cmd:02X}]  ({name})")
+        print(f"[SEND] 发送 PING: CAN ID=0x{CAN_ID_QUERY:03X}  data=[{sub_cmd:02X}]  ({name})")
         return True
     except Exception as e:
-        print(f"   ❌ 发送失败: {e}")
+        print(f"   [NG] 发送失败: {e}")
         return False
 
 
@@ -262,22 +274,22 @@ def main():
         return 0
 
     print()
-    print("╔═══════════════════════════════════════════════════╗")
-    print("║       BMS CAN 通道验证工具  bms_ping.py           ║")
-    print("╚═══════════════════════════════════════════════════╝")
+    print("+===================================================+")
+    print("|       BMS CAN 通道验证工具  bms_ping.py           |")
+    print("+===================================================+")
     print()
 
     # 1. 打开 CAN
-    print(f"🔌 打开 CAN 接口: {args.interface}:{args.channel} @ {args.bitrate // 1000}kbps...")
+    print(f"[BUS] 打开 CAN 接口: {args.interface}:{args.channel} @ {args.bitrate // 1000}kbps...")
     bus = open_can(args.interface, args.channel, args.bitrate)
     if bus is None:
         print()
-        print("💡 提示:")
+        print("[TIP] 提示:")
         print("   1. 确认 PCAN-USB 已插入并安装驱动 (PCANBasic.dll)")
         print("   2. 运行 --list 查看可用接口")
         print("   3. 确认 BMS 板已上电, CAN 总线终端电阻正确")
         return 1
-    print("   ✅ CAN 接口已打开")
+    print("   [OK] CAN 接口已打开")
     print()
 
     try:
@@ -291,7 +303,7 @@ def main():
         print()
 
         # 4. 等待响应
-        print(f"⏳ 等待响应 (超时 {args.timeout}s)...")
+        print(f"[...] 等待响应 (超时 {args.timeout}s)...")
         deadline = time.monotonic() + args.timeout
         response_count = 0
         extra_count = 0
@@ -313,7 +325,7 @@ def main():
                 if not responded:
                     responded = True
 
-                print(f"📥 收到响应 #{response_count}: CAN ID=0x{fid:03X}"
+                print(f"[RECV] 收到响应 #{response_count}: CAN ID=0x{fid:03X}"
                       f"  len={msg.dlc}  data=[{' '.join(f'{b:02X}' for b in msg.data[:msg.dlc])}]")
                 print_separator()
 
@@ -329,7 +341,7 @@ def main():
                         print_result("FET CHG",    "ON" if decoded['fet_chg'] else "OFF")
                         print_result("FET DSG",    "ON" if decoded['fet_dsg'] else "OFF")
                         print_result("Balancing",  "是" if decoded['balancing'] else "否")
-                        print_result("AFE Online", "✅" if decoded['afe_online'] else "❌")
+                        print_result("AFE Online", "[OK]" if decoded['afe_online'] else "[NG]")
                         print_result("Cell 9",     f"{decoded['cell9_mv']} mV")
                         print_separator()
 
@@ -365,7 +377,7 @@ def main():
             # 故障帧 (0x101) — 事件驱动, 也可能紧随查询出现
             elif fid == 0x101:
                 decoded = decode_fault_frame(msg.data)
-                print(f"📥 故障帧: CAN ID=0x{fid:03X}"
+                print(f"[RECV] 故障帧: CAN ID=0x{fid:03X}"
                       f"  len={msg.dlc}  data=[{' '.join(f'{b:02X}' for b in msg.data[:msg.dlc])}]")
                 print_separator()
                 if decoded.get("active_faults"):
@@ -385,30 +397,30 @@ def main():
         # 5. 结果判定
         print()
         if responded:
-            print(f"✅ CAN 通道验证通过! BMS 在线, 通信正常. (收到 {response_count} 帧)")
+            print(f"[OK] CAN 通道验证通过! BMS 在线, 通信正常. (收到 {response_count} 帧)")
             if extra_count:
                 print(f"   (另有 {extra_count} 帧周期上报)")
             return 0
         else:
-            print("❌ CAN 通道验证失败! 超时未收到 BMS 响应.")
+            print("[NG] CAN 通道验证失败! 超时未收到 BMS 响应.")
             print()
-            print("💡 排查建议:")
+            print("[TIP] 排查建议:")
             print("   1. BMS 板是否已上电? LED 是否闪烁?")
             print("   2. CAN H / CAN L 接线是否正确?")
             print("   3. 终端电阻是否已接 (120Ω 在 CAN H-L 之间)?")
             print("   4. 波特率是否匹配? (BMS 固件默认 500kbps)")
             print("   5. 尝试: python bms_ping.py --list 确认 PCAN 设备已识别")
             if extra_count:
-                print(f"   ℹ️  收到 {extra_count} 帧其他 CAN 消息,"
+                print(f"   [i]  收到 {extra_count} 帧其他 CAN 消息,"
                       f" BMS 可能正在周期上报但未响应查询 (子命令错误?)")
             return 1
 
     except KeyboardInterrupt:
-        print("\n⏹ 用户中断")
+        print("\n[STOP] 用户中断")
         return 130
     finally:
         bus.shutdown()
-        print("🔌 CAN 接口已关闭")
+        print("[BUS] CAN 接口已关闭")
 
 
 if __name__ == "__main__":
