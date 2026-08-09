@@ -27,6 +27,8 @@ void CanWorker::start(const QString &plugin, const QString &interface, int bitra
             this, &CanWorker::onFramesReceived);
     connect(m_device, &QCanBusDevice::errorOccurred,
             this, &CanWorker::onErrorOccurred);
+    connect(m_device, &QCanBusDevice::stateChanged,
+            this, &CanWorker::onDeviceStateChanged);
 
     if (!m_device->connectDevice()) {
         emit errorOccurred("Cannot connect: " + m_device->errorString());
@@ -36,6 +38,7 @@ void CanWorker::start(const QString &plugin, const QString &interface, int bitra
     }
 
     m_timedOut = false;
+    m_deviceConnected = true;
     m_timeoutTimer->start();
     emit connectionStatusChanged(true);
 }
@@ -43,6 +46,7 @@ void CanWorker::start(const QString &plugin, const QString &interface, int bitra
 void CanWorker::stop()
 {
     m_timedOut = false;
+    m_deviceConnected = false; // 主动停止不算设备丢失
     m_timeoutTimer->stop();
     if (m_device) {
         m_device->disconnectDevice();
@@ -93,4 +97,20 @@ void CanWorker::checkTimeout()
     m_timeoutTimer->stop();
     emit connectionStatusChanged(false);
     emit errorOccurred("CAN frame timeout (>500ms)");
+}
+
+void CanWorker::onDeviceStateChanged(QCanBusDevice::CanBusDeviceState state)
+{
+    // 物理设备丢失 (如 PCAN-USB 拔出): Connected → Unconnected
+    if (state == QCanBusDevice::UnconnectedState) {
+        handleDeviceLost();
+    }
+}
+
+void CanWorker::handleDeviceLost()
+{
+    if (!m_deviceConnected) return;
+    m_reconnectCount++;
+    emit reconnectCountChanged(m_reconnectCount);
+    m_deviceConnected = false;
 }
