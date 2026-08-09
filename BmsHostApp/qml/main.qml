@@ -30,6 +30,7 @@ ApplicationWindow {
         TabButton { text: "总览" }
         TabButton { text: "电芯" }
         TabButton { text: "曲线" }
+        TabButton { text: "设备状态" }
         Item { Layout.fillWidth: true }
         ToolButton { text: "☰"; onClicked: controlPanel.open() }
     }
@@ -40,6 +41,7 @@ ApplicationWindow {
         OverviewPage {}
         CellsPage { id: cellsPageObj; Component.onCompleted: root.cellsPage = cellsPageObj }
         TrendsPage {}
+        DeviceStatusPage {}
     }
 
     // 状态栏
