@@ -23,12 +23,16 @@
 #include "i2c.h"
 #include "iwdg.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "timer.h"
 #include "bms_app.h"
+#include "usart.h"
+#include "usart_drv.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -61,7 +65,11 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+/* ---- Step 2: printf 重定向到 USART1 ---- */
+int __io_putchar(int ch) {
+    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    return ch;
+}
 /* USER CODE END 0 */
 
 /**
@@ -97,8 +105,12 @@ int main(void)
   MX_I2C1_Init();
   MX_IWDG_Init();
   MX_TIM2_Init();
+  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  /* ---- printf 重定向到 USART1 ---- */
+  /* (__io_putchar 定义在 USER CODE 0 区) */
+  printf("BMS starting...\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
