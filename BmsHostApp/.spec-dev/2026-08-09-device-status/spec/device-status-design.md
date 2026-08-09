@@ -2,7 +2,7 @@
 spec_dev:
   version: 1
   feature: device-status
-  status: draft
+  status: active
   covers:
     - "can/CanWorker.h"
     - "can/CanWorker.cpp"
