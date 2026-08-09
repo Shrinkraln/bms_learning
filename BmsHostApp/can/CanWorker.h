@@ -23,6 +23,7 @@ public slots:
 signals:
     void batchReady(const QVector<CanFrame> &frames);
     void connectionStatusChanged(bool connected);
+    void deviceConnectedChanged(bool connected);
     void errorOccurred(const QString &errorString);
     void reconnectCountChanged(int count);
 

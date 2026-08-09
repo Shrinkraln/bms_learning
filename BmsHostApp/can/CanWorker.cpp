@@ -41,6 +41,7 @@ void CanWorker::start(const QString &plugin, const QString &interface, int bitra
     m_deviceConnected = true;
     m_timeoutTimer->start();
     emit connectionStatusChanged(true);
+    emit deviceConnectedChanged(true);
 }
 
 void CanWorker::stop()
@@ -113,4 +114,5 @@ void CanWorker::handleDeviceLost()
     m_reconnectCount++;
     emit reconnectCountChanged(m_reconnectCount);
     m_deviceConnected = false;
+    emit deviceConnectedChanged(false);
 }
