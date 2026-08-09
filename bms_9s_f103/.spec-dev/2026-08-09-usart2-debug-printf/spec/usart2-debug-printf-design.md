@@ -2,7 +2,7 @@
 spec_dev:
   version: 1
   feature: usart2-debug-printf
-  status: draft
+  status: active
   covers:
     - "bms_9s_f103/Core/Src/main.c"
   sync_commit: null
