@@ -40,6 +40,7 @@ qt_add_qml_module(BmsHostApp
         qml/components/GaugeArc.qml
         qml/components/CellBar.qml
         qml/components/FaultRibbon.qml
+        qml/components/StatusIndicator.qml
 )
 
 target_link_libraries(BmsHostApp PRIVATE

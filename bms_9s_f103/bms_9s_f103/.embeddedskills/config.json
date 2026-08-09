@@ -3,5 +3,12 @@
     "project": ".",
     "preset": "Debug",
     "log_dir": ".embeddedskills/build"
+  },
+  "openocd": {
+    "board": "",
+    "interface": "interface/stlink.cfg",
+    "target": "target/stm32f1x.cfg",
+    "adapter_speed": "",
+    "transport": "swd"
   }
 }

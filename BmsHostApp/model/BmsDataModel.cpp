@@ -39,6 +39,63 @@ void BmsDataModel::onConnectionChanged(bool connected)
     m_statusText = m_connStatus == CONNECTED ? "● 已连接"
         : m_connStatus == SHUTDOWN ? "⏻ BMS 已关机" : "⚠ 已断开";
     emit statusTextChanged(m_statusText);
+    // 总线帧活动变化 → 更新电池接入状态
+    updateBatteryStatus(connected, false, false);
+}
+
+void BmsDataModel::onDeviceConnected(bool connected)
+{
+    if (m_hardwareConnected != connected) {
+        m_hardwareConnected = connected;
+        emit hardwareConnectedChanged();
+    }
+    if (!connected) {
+        // 硬件丢失 → 电池状态未知
+        updateBatteryStatus(false, false, false);
+    }
+}
+
+void BmsDataModel::onCanError(const QString &msg)
+{
+    if (m_lastError != msg) {
+        m_lastError = msg;
+        emit lastErrorChanged(msg);
+    }
+}
+
+void BmsDataModel::updateBatteryStatus(bool busActive, bool haveAfeInfo, bool afeOnline)
+{
+    QString text;
+    QString color;
+    if (!m_hardwareConnected) {
+        // 硬件未连接 → 无法判断
+        text = QString::fromUtf8("— 等待设备");
+        color = "#999";
+    } else if (!busActive) {
+        // 硬件已连接但 CAN 总线无帧
+        text = m_shutdownSent ? QString::fromUtf8("⏻ BMS 已关机")
+                              : QString::fromUtf8("— 等待数据");
+        color = "#f39c12";
+    } else if (haveAfeInfo && afeOnline) {
+        // CAN 通信正常 + AFE 在线
+        text = QString::fromUtf8("● 电池已接入");
+        color = "#27ae60";
+    } else if (haveAfeInfo && !afeOnline) {
+        // CAN 通信正常但 AFE 离线
+        text = QString::fromUtf8("⚠ 电池未接入");
+        color = "#e74c3c";
+    } else {
+        text = QString::fromUtf8("— 等待数据");
+        color = "#f39c12";
+    }
+    if (m_batteryStatusText != text) {
+        m_batteryStatusText = text;
+        emit batteryStatusTextChanged(text);
+    }
+    if (m_batteryStatusColor != color) {
+        m_batteryStatusColor = color;
+        emit batteryStatusColorChanged(color);
+    }
 }
 
 void BmsDataModel::applySnapshot(const BmsSnapshot &snap)
@@ -92,6 +149,9 @@ void BmsDataModel::applySnapshot(const BmsSnapshot &snap)
 
     // CSV
     if (m_csvLogger) { m_csvLogger->appendRow(snap); }
+
+    // 电池接入状态: 有解码后的快照 → 以 afe_online 为准
+    updateBatteryStatus(m_canBusConnected, true, snap.afe_online);
 
     // AFE 在线状态 → 连接显示
     if (!snap.afe_online && m_connStatus == CONNECTED) {

@@ -15,15 +15,15 @@
   *          is using in the C source code, usually in main.c. This file contains:
   *           - Configuration section that allows to select:
   *              - The device used in the target application
-  *              - To use or not the peripheral’s drivers in application code(i.e. 
-  *                code will be based on direct access to peripheral’s registers 
+  *              - To use or not the peripheralï¿½s drivers in application code(i.e. 
+  *                code will be based on direct access to peripheralï¿½s registers 
   *                rather than drivers API), this option is controlled by 
   *                "#define USE_STDPERIPH_DRIVER"
   *              - To change few application-specific parameters such as the HSE 
   *                crystal frequency
   *           - Data structures and the address mapping for all peripherals
   *           - Peripheral's registers declarations and bits definition
-  *           - Macros to access peripheral’s registers hardware
+  *           - Macros to access peripheralï¿½s registers hardware
   *
   ******************************************************************************
   * @attention
@@ -216,7 +216,7 @@ typedef enum IRQn
   USART2_IRQn                 = 38,     /*!< USART2 global Interrupt                              */
   EXTI15_10_IRQn              = 40,     /*!< External Line[15:10] Interrupts                      */
   RTCAlarm_IRQn               = 41,     /*!< RTC Alarm through EXTI Line Interrupt                */
-  USBWakeUp_IRQn              = 42      /*!< USB Device WakeUp from suspend through EXTI Line Interrupt */    
+  USBWakeUp_IRQn              = 42,     /*!< USB Device WakeUp from suspend through EXTI Line Interrupt */    
 #endif /* STM32F10X_LD */  
 
 #ifdef STM32F10X_LD_VL
@@ -237,7 +237,7 @@ typedef enum IRQn
   RTCAlarm_IRQn               = 41,     /*!< RTC Alarm through EXTI Line Interrupt                */
   CEC_IRQn                    = 42,     /*!< HDMI-CEC Interrupt                                   */
   TIM6_DAC_IRQn               = 54,     /*!< TIM6 and DAC underrun Interrupt                      */
-  TIM7_IRQn                   = 55      /*!< TIM7 Interrupt                                       */       
+  TIM7_IRQn                   = 55,     /*!< TIM7 Interrupt                                       */       
 #endif /* STM32F10X_LD_VL */
 
 #ifdef STM32F10X_MD
@@ -265,7 +265,7 @@ typedef enum IRQn
   USART3_IRQn                 = 39,     /*!< USART3 global Interrupt                              */
   EXTI15_10_IRQn              = 40,     /*!< External Line[15:10] Interrupts                      */
   RTCAlarm_IRQn               = 41,     /*!< RTC Alarm through EXTI Line Interrupt                */
-  USBWakeUp_IRQn              = 42      /*!< USB Device WakeUp from suspend through EXTI Line Interrupt */  
+  USBWakeUp_IRQn              = 42,     /*!< USB Device WakeUp from suspend through EXTI Line Interrupt */  
 #endif /* STM32F10X_MD */  
 
 #ifdef STM32F10X_MD_VL
@@ -291,7 +291,7 @@ typedef enum IRQn
   RTCAlarm_IRQn               = 41,     /*!< RTC Alarm through EXTI Line Interrupt                */
   CEC_IRQn                    = 42,     /*!< HDMI-CEC Interrupt                                   */
   TIM6_DAC_IRQn               = 54,     /*!< TIM6 and DAC underrun Interrupt                      */
-  TIM7_IRQn                   = 55      /*!< TIM7 Interrupt                                       */       
+  TIM7_IRQn                   = 55,     /*!< TIM7 Interrupt                                       */       
 #endif /* STM32F10X_MD_VL */
 
 #ifdef STM32F10X_HD
@@ -336,7 +336,7 @@ typedef enum IRQn
   DMA2_Channel1_IRQn          = 56,     /*!< DMA2 Channel 1 global Interrupt                      */
   DMA2_Channel2_IRQn          = 57,     /*!< DMA2 Channel 2 global Interrupt                      */
   DMA2_Channel3_IRQn          = 58,     /*!< DMA2 Channel 3 global Interrupt                      */
-  DMA2_Channel4_5_IRQn        = 59      /*!< DMA2 Channel 4 and Channel 5 global Interrupt        */
+  DMA2_Channel4_5_IRQn        = 59,     /*!< DMA2 Channel 4 and Channel 5 global Interrupt        */
 #endif /* STM32F10X_HD */  
 
 #ifdef STM32F10X_HD_VL
@@ -374,7 +374,7 @@ typedef enum IRQn
   DMA2_Channel2_IRQn          = 57,     /*!< DMA2 Channel 2 global Interrupt                      */
   DMA2_Channel3_IRQn          = 58,     /*!< DMA2 Channel 3 global Interrupt                      */
   DMA2_Channel4_5_IRQn        = 59,     /*!< DMA2 Channel 4 and Channel 5 global Interrupt        */
-  DMA2_Channel5_IRQn          = 60      /*!< DMA2 Channel 5 global Interrupt (DMA2 Channel 5 is 
+  DMA2_Channel5_IRQn          = 60,     /*!< DMA2 Channel 5 global Interrupt (DMA2 Channel 5 is
                                              mapped at position 60 only if the MISC_REMAP bit in 
                                              the AFIO_MAPR2 register is set)                      */       
 #endif /* STM32F10X_HD_VL */
@@ -421,7 +421,7 @@ typedef enum IRQn
   DMA2_Channel1_IRQn          = 56,     /*!< DMA2 Channel 1 global Interrupt                      */
   DMA2_Channel2_IRQn          = 57,     /*!< DMA2 Channel 2 global Interrupt                      */
   DMA2_Channel3_IRQn          = 58,     /*!< DMA2 Channel 3 global Interrupt                      */
-  DMA2_Channel4_5_IRQn        = 59      /*!< DMA2 Channel 4 and Channel 5 global Interrupt        */
+  DMA2_Channel4_5_IRQn        = 59,     /*!< DMA2 Channel 4 and Channel 5 global Interrupt        */
 #endif /* STM32F10X_XL */  
 
 #ifdef STM32F10X_CL
@@ -467,7 +467,7 @@ typedef enum IRQn
   CAN2_RX0_IRQn               = 64,     /*!< CAN2 RX0 Interrupt                                   */
   CAN2_RX1_IRQn               = 65,     /*!< CAN2 RX1 Interrupt                                   */
   CAN2_SCE_IRQn               = 66,     /*!< CAN2 SCE Interrupt                                   */
-  OTG_FS_IRQn                 = 67      /*!< USB OTG FS global Interrupt                          */
+  OTG_FS_IRQn                 = 67,     /*!< USB OTG FS global Interrupt                          */
 #endif /* STM32F10X_CL */     
 } IRQn_Type;
 

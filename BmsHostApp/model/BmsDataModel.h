@@ -34,6 +34,11 @@ class BmsDataModel : public QObject {
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusTextChanged)
     Q_PROPERTY(QString lastUpdate READ lastUpdate NOTIFY lastUpdateChanged)
     Q_PROPERTY(qreal avgTempC READ avgTempC NOTIFY avgTempCChanged)
+    // 硬件 & 电池接入状态 (new)
+    Q_PROPERTY(bool hardwareConnected READ hardwareConnected NOTIFY hardwareConnectedChanged)
+    Q_PROPERTY(QString batteryStatusText READ batteryStatusText NOTIFY batteryStatusTextChanged)
+    Q_PROPERTY(QString batteryStatusColor READ batteryStatusColor NOTIFY batteryStatusColorChanged)
+    Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     // 列表模型
     Q_PROPERTY(QObject* cellVoltageModel READ cellVoltageModel CONSTANT)
     Q_PROPERTY(QObject* temperatureModel READ temperatureModel CONSTANT)
@@ -65,6 +70,11 @@ public:
     QString statusText() const { return m_statusText; }
     QString lastUpdate() const { return m_lastUpdate; }
     qreal avgTempC() const { return m_avgTempC; }
+    // 硬件 & 电池接入 (new)
+    bool hardwareConnected() const { return m_hardwareConnected; }
+    QString batteryStatusText() const { return m_batteryStatusText; }
+    QString batteryStatusColor() const { return m_batteryStatusColor; }
+    QString lastError() const { return m_lastError; }
     QObject* cellVoltageModel() { return &m_cellModel; }
     QObject* temperatureModel() { return &m_tempModel; }
     QObject* faultListModel() { return &m_faultModel; }
@@ -75,6 +85,8 @@ public:
 public slots:
     void onBatchReady(const QVector<CanFrame> &batch);
     void onConnectionChanged(bool connected);
+    void onDeviceConnected(bool connected);   // new — PCAN 设备物理连接
+    void onCanError(const QString &msg);      // new — CAN 错误消息
 
     // Q_INVOKABLE
     Q_INVOKABLE void sendQuery(quint8 subCmd);
@@ -95,9 +107,15 @@ signals:
     void lastUpdateChanged(const QString &text);
     void statusTextChanged(const QString &text);
     void avgTempCChanged();
+    // 硬件 & 电池接入 (new)
+    void hardwareConnectedChanged();
+    void batteryStatusTextChanged(const QString &text);
+    void batteryStatusColorChanged(const QString &color);
+    void lastErrorChanged(const QString &msg);
 
 private:
     void applySnapshot(const BmsSnapshot &snap);
+    void updateBatteryStatus(bool busActive, bool haveAfeInfo, bool afeOnline);
 
     BmsSnapshot m_snap;
     int m_connStatus = DISCONNECTED;
@@ -105,6 +123,11 @@ private:
     QString m_statusText = "⚠ 已断开";
     QString m_lastUpdate = "--";
     qreal m_avgTempC = 0.0;
+    // 硬件 & 电池接入 (new)
+    bool m_hardwareConnected = false;
+    QString m_batteryStatusText = QString::fromUtf8("— 等待数据");
+    QString m_batteryStatusColor = "#999";
+    QString m_lastError;
     QTimer m_timer;
     CanWorker *m_canWorker = nullptr;
     CsvLogger *m_csvLogger = nullptr;

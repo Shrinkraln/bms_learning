@@ -42,12 +42,59 @@ ApplicationWindow {
         TrendsPage {}
     }
 
-    // 状态栏
+    // 状态栏: 硬件设备 / 电池接入 两级状态 + 错误提示
     footer: Rectangle {
         height: 28; color: "#f5f5f5"
         RowLayout {
-            anchors.fill: parent; anchors.margins: 6
-            Text { text: bms.statusText; id: statusLabel }
+            anchors.fill: parent; anchors.margins: 6; spacing: 16
+
+            // ① 硬件层: PCAN USB 设备
+            Row {
+                spacing: 5
+                Rectangle {
+                    width: 10; height: 10; radius: 5
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: bms.hardwareConnected ? "#2e7d32" : "#c62828"
+                }
+                Text {
+                    text: bms.hardwareConnected ? "● 设备已连接" : "● 设备未连接"
+                    color: bms.hardwareConnected ? "#2e7d32" : "#c62828"
+                    font.pixelSize: 12
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+
+            // 分隔
+            Rectangle { width: 1; height: 16; color: "#ccc" }
+
+            // ② 电池层: BMS AFE 接入状态
+            Row {
+                spacing: 5
+                Rectangle {
+                    width: 10; height: 10; radius: 5
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: bms.batteryStatusColor
+                }
+                Text {
+                    text: bms.batteryStatusText
+                    color: bms.batteryStatusColor
+                    font.pixelSize: 12
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+
+            // ③ 错误信息 (有错误时显示)
+            Text {
+                visible: bms.lastError !== ""
+                text: bms.lastError.length > 80
+                    ? bms.lastError.substring(0, 80) + "..."
+                    : bms.lastError
+                color: "#c62828"
+                font.pixelSize: 11
+                elide: Text.ElideRight
+                Layout.maximumWidth: 400
+            }
+
             Item { Layout.fillWidth: true }
             Text { text: "最后更新: " + bms.lastUpdate; color: "#999" }
         }

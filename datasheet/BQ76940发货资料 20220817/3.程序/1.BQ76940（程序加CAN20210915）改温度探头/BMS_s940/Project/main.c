@@ -1,264 +1,151 @@
-/******************** (C) BOBO   ********************************
- * Œƒº˛√˚  £∫main.c
- * √Ë ˆ    £∫÷˜“™ «ÕÍ≥…BMSœ‡πÿºÏ≤‚∫Õ±£ª§
- * ø‚∞Ê±æ  £∫V3.50
- * ◊˜’ﬂ    £∫BOBO
- * ∞Ê±æ∏¸–¬: 2019-04-12
- * µ˜ ‘∑Ω Ω£∫J-Link
+/******************** CAN Test Program ********************************
+ * File     : main.c
+ * Function : CAN communication test - stripped down from BMS project
+ *            Sends test CAN frames to host computer (‰∏ä‰ΩçÊú∫) and
+ *            listens for incoming CAN messages
+ * Version  : CAN_Test_V1.0
+ * Author   : (based on original BMS project)
+ * Date     : 2026-08-08
+ *
+ * CAN Config:
+ *   - Baud rate: 500kbps (36MHz / ((9+8+1)*4))
+ *   - Extended ID (29-bit)
+ *   - Normal mode
+ *   - PA11 = CAN_RX, PA12 = CAN_TX
+ *
+ * Protocol (matching original):
+ *   - 7 frames with IDs 0x0001 ~ 0x0007
+ *   - Each frame: 8 bytes
+ *   - Frame format: [0xAA, SeqNum, CounterH, CounterL, 0x55, 0xAA, ID_L, ID_H]
+ *
+ * LED Indicators:
+ *   - LED1 (PA15): Toggles on each CAN send burst (~1Hz)
+ *   - LED2 (PB13): Toggles when CAN message is received
+ *   - LED3 (PB14): ON when CAN init OK
+ *   - LED4 (PB15): Error indicator (CAN send failure)
 **********************************************************************************/
 
-//Õ∑Œƒº˛
+/* Includes ------------------------------------------------------------------*/
 #include "stm32f10x.h"
 #include "led.h"
-#include "wdg.h"
-#include "SYSTICK.h"
-#include "usart.h"
-#include "usart2.h"
-#include "i2c.h"
-#include "i2c1.h"
-#include "i2c2.h"
-#include "BQ76930.h"
-#include "IO_CTRL.h"
-#include <stdio.h>
-#include "math.h"
-#include "timer.h"
-#include "stm32f10x_it.h"
-#include "w25qxx.h"
-#include "spi.h"
+#include "systick.h"
 #include "can.h"
+
+/* Private variables ---------------------------------------------------------*/
+static u32 g_send_count = 0;    /* CAN send burst counter */
+static u32 g_recv_count = 0;    /* CAN receive counter */
+static u32 g_send_fail = 0;     /* CAN send failure counter */
+
 /**
-  * @file   main
-  * @brief  Main program.
+  * @brief  Main program - CAN communication test
   * @param  None
-  * @retval None
+  * @retval int
   */
-	
-/* ¥Ê¥¢ ˝æ›Flash“≥ ◊µÿ÷∑ 60K Œ™ ◊µÿ÷∑£¨º¥¡Ù∏¯≥Ã–Ú¥˙¬Îµƒø’º‰”–60K¥Û–°£¨103C8T6µƒFLASHµƒ¥Û–°”–62K*£¨√ø∏ˆµÿ÷∑µ›‘ˆ“ª“≥£¨“≤æÕ «+0X802*/
-    uint32_t   Battery_ADR     =  0x08007800 ;  
-    uint32_t   Temp_up         =  0x08007C00 ; 		
-		
- 
-		 
-	void Write_Flash(uint32_t Add,unsigned int Data)
-	{	
-		  FLASH_Unlock();		/* √ø¥Œ≤¡≥˝Flash÷– ˝æ› ±µ√œ»Ω‚À¯ */
-      FLASH_ErasePage(Add);		  /* ≤¡≥˝“≥ */		
-		  FLASH_ProgramWord(Add,Data);   /* –¥16Œª∞Î◊÷ */
-		  FLASH_Lock();							   /* …œÀ¯ */		  
-	}
-	
-unsigned int Read_Flash(uint32_t Add)
-	{	
-		unsigned int Data;
-		Data=*(vu16*)(Add);	 /* ∂¡»°µÿ÷∑÷–µƒ16Œª ˝æ› */ 
-		return Data;
-	}		
-unsigned char SEND_readparameter_TO_SHANGWEIJI[500]={0XAA,0X88};
-	
-
-extern unsigned char ucUSART1_ReceiveDataBuffer[];
-unsigned char BMS_DATA_FLAG;
-void RECEICE_DATA_DEAL(void)
-{
-	int i,n,t,u,r,Crc_result;
-	unsigned char p_USART1_ReceiveDataBuffer[10];
-	
-if( Get_USART1_StopFlag() == USART1_STOP_TRUE)  //????????????
-  {
-		
-		if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X02)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-			BMS_DATA_FLAG=1;				
-		 }
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X03)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-			BMS_DATA_FLAG=0;				
-		 }
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X04)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-			Only_Open_DSG	();		
-		 }
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X05)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-			Only_Close_DSG();			
-		 }
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X06)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-			Only_Open_CHG	();		
-		 }
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X07)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-			Only_Close_CHG();			
-		 }
-		 
-		 
-//		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X10)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-//		 {
-//       LEDXToggle(5);
-//			 FUN_POWER_EN_ONOFF(1);			
-//		 }
-//		 
-//		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X11)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-//		 {
-//       LEDXToggle(5);
-//			FUN_POWER_EN_ONOFF(0);			
-//		 }
-//		 
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X12)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-       Write_Flash(Battery_ADR ,(ucUSART1_ReceiveDataBuffer[3]<<8) +ucUSART1_ReceiveDataBuffer[4]);							
-		 }
-		 
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X13)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-       Write_Flash(Temp_up ,(ucUSART1_ReceiveDataBuffer[3]<<8) +ucUSART1_ReceiveDataBuffer[4]);							
-		 }
-		 
-		 if((ucUSART1_ReceiveDataBuffer[0] ==0X01) && (ucUSART1_ReceiveDataBuffer[1] ==0X14)&& (ucUSART1_ReceiveDataBuffer[2] ==0X55))
-		 {
-       LEDXToggle(5);
-       SEND_readparameter_TO_SHANGWEIJI[2]=(Read_Flash(Battery_ADR)>>8);
-       SEND_readparameter_TO_SHANGWEIJI[3]= Read_Flash(Battery_ADR)&0X00FF;
-       SEND_readparameter_TO_SHANGWEIJI[4]=(Read_Flash(Temp_up)>>8);
-       SEND_readparameter_TO_SHANGWEIJI[5]= Read_Flash(Temp_up)&0X00FF;				 
-			 USART1_Printf( SEND_readparameter_TO_SHANGWEIJI,50, ASCII_CODE );								
-
-		 }
-		 
-		 
-		 
-	}
-			Set_USART1_StopFlag( USART1_STOP_FALSE );
-	}
-	
-	u8 key,u;	
-	u8 canbuf[8];
-	
-	const u8 TEXT_Buffer[]={0,1};
-#define SIZE sizeof(TEXT_Buffer)
-	u8 datatemp[SIZE]ACTIVATE_USART1,Temp_up_flag,OV_FLAG,UV_FLAG,OC_FLAG;
-	u32 FLASH_SIZE = 16*1024*1024;
-extern UV_Alarm_flag,OV_Alarm_flag,SCD_Alarm_flag,OCD_Alarm_flag,OT_Alarm_flag,UT_Alarm_flag;
-extern int Batteryval[50];
 int main(void)
 {
-    SYSTICK_Init(); //œµÕ≥≥ı ºªØ£¨ ±÷”≈‰÷√£ª
-	  NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2); //…Ë÷√NVIC÷–∂œ∑÷◊È2:2Œª«¿’º”≈œ»º∂£¨2ŒªœÏ”¶”≈œ»º∂
-    delay_ms(1000);
-	  uart_init(115200);	 //¥Æø⁄≥ı ºªØŒ™115200   
-	  USART2_Config();    //¿∂—¿¥Æø⁄≥ı ºªØŒ™9600
-    LED_GPIO_Config();//µÁ¡øœ‘ æ£¨4∏ˆLED…Ë÷√£ª
-    IO_CTRL_Config(); //œµÕ≥µƒ“ª–©IOø⁄…Ë÷√£ª	   
-	  I2C1_Configuration();  //BQ76940_1µƒIIC≈‰÷√£ª
-	  CAN_Mode_Init(CAN_SJW_1tq,CAN_BS2_8tq,CAN_BS1_9tq,4,CAN_Mode_Normal);//CAN≥ı ºªØª∑ªÿƒ£ Ω,≤®Ãÿ¬ 500Kbps    
+    u8  can_rx_buf[8];
+    u8  can_tx_buf[8];
+    u8  msg_idx;
+    u8  rx_len;
+    u32 tick_counter = 0;
 
-	  BQ76930_config();      //BQ76940µƒ≥ı ºªØ£¨ªΩ–—…Ë±∏£¨OV,UV,SCD,OCDµƒ≈‰÷√£ª	
-	  LED4_ONOFF(1) ;
-   	TIM2_Config(99,7199);//100mS∂® ±∆˜÷–∂œ
-	  UartSend("MODE_CFG(1);DIR(1);FSIMG(2097152,0,0,220,176,0);\r\n");
-	  delay_ms(1000);   	
-    UartSend("CLR(61);\r\n");
-	  IWDG_Init(6,1250);      //ø¥√≈π∑4S◊Û”“
+    /* ---- System Initialization ---- */
+    SYSTICK_Init();
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
+    delay_ms(500);
+
+    /* ---- LED Initialization ---- */
+    LED_GPIO_Config();
+    LED4_ONOFF(1);   /* LED4 ON during init */
+
+    /* ---- CAN Initialization ----
+       Parameters: SJW=1tq, BS2=8tq, BS1=9tq, BRP=4, Mode=Normal
+       Baud Rate = Fpclk1 / ((BS1+BS2+1) * BRP)
+                = 36MHz / ((9+8+1) * 4)
+                = 500kbps
+    */
+    if (CAN_Mode_Init(CAN_SJW_1tq, CAN_BS2_8tq, CAN_BS1_9tq, 4, CAN_Mode_Normal) == 0)
+    {
+        /* CAN init OK - LED3 ON, LED4 OFF */
+        LED3_ONOFF(1);
+        LED4_ONOFF(0);
+    }
+    else
+    {
+        /* CAN init FAIL - LED3 OFF, LED4 stays ON */
+        LED3_ONOFF(0);
+        while (1)
+        {
+            /* Blink LED4 fast to indicate init error */
+            LEDXToggle(4);
+            delay_ms(100);
+        }
+    }
+
+    /* ---- Startup indication: blink LED1 3 times ---- */
+    for (int i = 0; i < 3; i++)
+    {
+        LEDXToggle(1);
+        delay_ms(200);
+    }
+
+    /* ======================== Main Loop ======================== */
     while (1)
-    {	
-	   IWDG_Feed();
-		 LEDXToggle(1);
-		key=Can_Receive_Msg(canbuf);
-		if(key)//Ω” ’µΩ”– ˝æ›
-		{			
- 			for(u=0;u<key;u++)
-			{
-						 LEDXToggle(1);
+    {
+        /* ----- Check for received CAN messages ----- */
+        rx_len = Can_Receive_Msg(can_rx_buf);
+        if (rx_len > 0)
+        {
+            g_recv_count++;
+            LEDXToggle(2);   /* Toggle LED2 on each received CAN frame */
 
- 			}
-		}
-		 RECEICE_DATA_DEAL();
-	   Get_Update_Data();
-			if((Batteryval[0]>4200)||(Batteryval[1]>4200)||(Batteryval[4]>4200)||(Batteryval[5]>4200)||(Batteryval[6]>4200)||(Batteryval[9]>4200)||(Batteryval[10]>4200)||(Batteryval[11]>4200)||(Batteryval[14]>4200))
-					{
-						Only_Close_CHG();                        //
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨
-						OV_FLAG=1;
-					}
-     if(OV_FLAG==1)
-		 {
-					if((Batteryval[0]<4100)&&(Batteryval[1]<4100)&&(Batteryval[4]<4100)&&(Batteryval[5]<4100)&&(Batteryval[6]<4100)&&(Batteryval[9]<4100)&&(Batteryval[10]<4100)&&(Batteryval[11]<4100)&&(Batteryval[14]<4100))
-					{
-						Only_Open_CHG();                         //
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨
-						OV_FLAG=0;
-					}
-			}
-		 
-			
-					if((Batteryval[0]<2800)||(Batteryval[1]<2800)||(Batteryval[4]<2800)||(Batteryval[5]<2800)||(Batteryval[6]<2800)||(Batteryval[9]<2800)||(Batteryval[10]<2800)||(Batteryval[11]<2800)||(Batteryval[14]<2800))
-					{
-						Only_Close_DSG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨
-						UV_FLAG=1;
-					}
-          if(UV_FLAG==1)
-					{
-					if((Batteryval[0]>2800)&&(Batteryval[1]>2800)&&(Batteryval[4]>2800)&&(Batteryval[5]>2800)&&(Batteryval[6]>2800)&&(Batteryval[9]>2800)&&(Batteryval[10]>2800)&&(Batteryval[11]>2800)&&(Batteryval[14]>2800))
-					{
-						Only_Open_DSG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨
-            UV_FLAG=0;						
-					}
-		     }
-			if(Batteryval[17]>2000)//»Áπ˚µÁ¡˜¥Û”⁄2000ma£¨πÿ±’≥‰∑≈µÁMOSπ‹
-			{
-			      Close_DSG_CHG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨	
-				    OC_FLAG=1;
-			}
-			if( OC_FLAG==1)
-			{
-						if(Batteryval[17]<2000)//»Áπ˚µÁ¡˜¥Û”⁄2000ma£¨πÿ±’≥‰∑≈µÁMOSπ‹
-						{
-									Open_DSG_CHG();
-									IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨	
-									OC_FLAG=0;
-						}
-						
-			}
-			
-						if(Batteryval[18]>Read_Flash(Temp_up))//»Áπ˚µÁ¡˜¥Û”⁄2000ma£¨πÿ±’≥‰∑≈µÁMOSπ‹
-			{
-			      Close_DSG_CHG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨	
+            /* Echo received data back on CAN with ID 0x0100 offset */
+            /* This allows the host to verify bidirectional communication */
+            Can_Send_Msg(can_rx_buf, rx_len, 0x0100 + (can_rx_buf[1] & 0x07));
+            delay_ms(1);
+        }
 
-				    Temp_up_flag = 1;
-			}
-			if(Temp_up_flag == 1)
-			{
-			  if(Batteryval[18]<Read_Flash(Temp_up))
-				{
-					  Open_DSG_CHG();
-											IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //«Â≥˝◊¥Ã¨	
+        /* ----- Send 7 CAN test frames every ~500ms ----- */
+        tick_counter++;
+        if (tick_counter >= 50)   /* 50 * 10ms = 500ms */
+        {
+            tick_counter = 0;
 
-				    Temp_up_flag = 0;
-					
-				}
-			
-			}
+            for (msg_idx = 0; msg_idx < 7; msg_idx++)
+            {
+                /* Build CAN test frame */
+                can_tx_buf[0] = 0xAA;                           /* Header: Start byte */
+                can_tx_buf[1] = 0x01 + msg_idx;                 /* Sequence: 0x01~0x07 */
+                can_tx_buf[2] = (u8)(g_send_count >> 8);        /* Counter High byte */
+                can_tx_buf[3] = (u8)(g_send_count & 0x00FF);    /* Counter Low byte */
+                can_tx_buf[4] = 0x55;                           /* Test pattern */
+                can_tx_buf[5] = 0xAA;                           /* Test pattern */
+                can_tx_buf[6] = (u8)(g_recv_count >> 8);        /* RX count High */
+                can_tx_buf[7] = (u8)(g_recv_count & 0x00FF);    /* RX count Low */
 
-			
-		}
+                /* Send via CAN (Extended ID: 0x0001 ~ 0x0007) */
+                if (Can_Send_Msg(can_tx_buf, 8, 0x0001 + msg_idx) != 0)
+                {
+                    g_send_fail++;
+                }
+                delay_ms(2);
+            }
+
+            g_send_count++;
+            LEDXToggle(1);   /* Toggle LED1 on each send burst */
+
+            /* If too many send failures, indicate error on LED4 */
+            if (g_send_fail > 10)
+            {
+                LEDXToggle(4);
+                g_send_fail = 0;
+            }
+        }
+
+        delay_ms(10);   /* Loop period: 10ms */
+    }
 }
-/*********************************************************************************************************
+
+/*******************************************************************************
       END FILE
-*********************************************************************************************************/
-
-
-
-
-
+*******************************************************************************/

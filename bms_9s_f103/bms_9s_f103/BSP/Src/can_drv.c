@@ -24,6 +24,24 @@ void can_drv_init(void)
     ring_buf_init(&can_rx_fifo, can_rx_buf,
                   (uint16_t)sizeof(can_msg_t), CAN_RX_FIFO_DEPTH);
 
+    /* ---- CAN 过滤器: 接收所有报文到 FIFO0 ---- */
+    CAN_FilterTypeDef sFilterConfig;
+    sFilterConfig.FilterBank           = 0;
+    sFilterConfig.FilterMode           = CAN_FILTERMODE_IDMASK;
+    sFilterConfig.FilterScale          = CAN_FILTERSCALE_32BIT;
+    sFilterConfig.FilterIdHigh         = 0x0000U;
+    sFilterConfig.FilterIdLow          = 0x0000U;
+    sFilterConfig.FilterMaskIdHigh     = 0x0000U;
+    sFilterConfig.FilterMaskIdLow      = 0x0000U;
+    sFilterConfig.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+    sFilterConfig.FilterActivation     = CAN_FILTER_ENABLE;
+    sFilterConfig.SlaveStartFilterBank = 14;
+    HAL_CAN_ConfigFilter(&hcan, &sFilterConfig);
+
+    /* 使能 FIFO0 接收中断 (与 HAL_CAN_ActivateNotification 的 FIFO0 匹配) */
+    HAL_NVIC_SetPriority(USB_LP_CAN1_RX0_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USB_LP_CAN1_RX0_IRQn);
+
     if (HAL_CAN_Start(&hcan) != HAL_OK) {
         return;
     }

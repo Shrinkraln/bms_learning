@@ -82,6 +82,9 @@ set(BSP_Src
     # ---- Step 14: 定时器 + 看门狗 ----
     BSP/Src/timer.c
     BSP/Src/wdg.c
+
+    # ---- 串口驱动 ----
+    BSP/Src/usart_drv.c
 )
 
 add_library(BSP OBJECT)

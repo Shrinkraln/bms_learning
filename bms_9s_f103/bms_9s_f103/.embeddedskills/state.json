@@ -17,6 +17,22 @@
     "debug_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
     "flash_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
     "log_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\.embeddedskills\\build\\bms_9s_f103-Debug-build.log",
-    "timestamp": "2026-07-29T06:53:34+00:00"
+    "timestamp": "2026-08-08T10:01:34+00:00"
+  },
+  "last_flash": {
+    "provider": "openocd",
+    "action": "flash",
+    "board": "",
+    "interface": "interface/stlink.cfg",
+    "target": "target/stm32f1x.cfg",
+    "search": "",
+    "adapter_speed": "",
+    "transport": "swd",
+    "flash_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+    "artifacts": {
+      "flash_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf",
+      "input_file": "D:\\coding_codes\\bms_learning\\bms_9s_f103\\bms_9s_f103\\build\\Debug\\bms_9s_f103.elf"
+    },
+    "timestamp": "2026-08-08T10:01:56+00:00"
   }
 }
