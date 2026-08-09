@@ -26,7 +26,8 @@ Page {
         // === Layer 1: PCAN 硬件 ===
         LayerCard {
             layerName: "PCAN 硬件"
-            statusColor: commMonitor.hardwareConnected ? "#27ae60" : "#e74c3c"
+            statusColor: commMonitor.hardwareConnected ? "#27ae60"
+                       : commMonitor.reconnectCount > 0 ? "#e74c3c" : "#999"
             statusText: {
                 if (commMonitor.hardwareConnected) return "● 设备已连接"
                 if (commMonitor.reconnectCount > 0) return "● 设备丢失 (重连中...)"
@@ -142,12 +143,14 @@ Page {
 
             // 状态指示灯
             Rectangle {
+                id: ledDot
                 width: 16; height: 16; radius: 8
                 color: statusColor
                 opacity: 1.0
 
                 // 脉冲动画
                 SequentialAnimation on opacity {
+                    id: blinkAnim
                     running: blinkState !== "solid"
                     loops: Animation.Infinite
                     PropertyAnimation {
@@ -158,6 +161,7 @@ Page {
                         from: 0.15; to: 1.0
                         duration: blinkState === "fast" ? 250 : 1000
                     }
+                    onStopped: ledDot.opacity = 1.0
                 }
             }
 

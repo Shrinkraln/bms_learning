@@ -66,10 +66,6 @@ int main(int argc, char *argv[])
                      &bmsModel, &BmsDataModel::onBatchReady);
     QObject::connect(&canWorker, &CanWorker::connectionStatusChanged,
                      &bmsModel, &BmsDataModel::onConnectionChanged);
-    QObject::connect(&canWorker, &CanWorker::deviceConnectedChanged,
-                     &bmsModel, &BmsDataModel::onDeviceConnected);
-    QObject::connect(&canWorker, &CanWorker::errorOccurred,
-                     &bmsModel, &BmsDataModel::onCanError);
 
     engine.rootContext()->setContextProperty("bms", &bmsModel);
     engine.rootContext()->setContextProperty("commMonitor", &commMonitor);

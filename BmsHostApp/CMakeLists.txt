@@ -41,7 +41,8 @@ qt_add_qml_module(BmsHostApp
         qml/components/GaugeArc.qml
         qml/components/CellBar.qml
         qml/components/FaultRibbon.qml
-)
+        qml/DeviceStatusPage.qml
+    )
 
 target_link_libraries(BmsHostApp PRIVATE
     Qt6::Core Qt6::Quick Qt6::Qml Qt6::SerialBus Qt6::Charts Qt6::Widgets)

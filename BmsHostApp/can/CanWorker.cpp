@@ -111,6 +111,7 @@ void CanWorker::onDeviceStateChanged(QCanBusDevice::CanBusDeviceState state)
 void CanWorker::handleDeviceLost()
 {
     if (!m_deviceConnected) return;
+    m_timeoutTimer->stop();
     m_reconnectCount++;
     emit reconnectCountChanged(m_reconnectCount);
     m_deviceConnected = false;
