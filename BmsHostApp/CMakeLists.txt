@@ -21,6 +21,7 @@ qt_add_executable(BmsHostApp
     model/CellVoltageModel.h model/CellVoltageModel.cpp
     model/TemperatureModel.h model/TemperatureModel.cpp
     model/FaultListModel.h model/FaultListModel.cpp
+    model/CommunicationMonitor.h model/CommunicationMonitor.cpp
 )
 
 # Qt policy: QTP0001 NEW — QML 资源前缀为 ':/qt/qml/' (main.cpp 加载 qrc:/qt/qml/com/bms/host/qml/main.qml)
@@ -41,7 +42,8 @@ qt_add_qml_module(BmsHostApp
         qml/components/CellBar.qml
         qml/components/FaultRibbon.qml
         qml/components/StatusIndicator.qml
-)
+        qml/DeviceStatusPage.qml
+    )
 
 target_link_libraries(BmsHostApp PRIVATE
     Qt6::Core Qt6::Quick Qt6::Qml Qt6::SerialBus Qt6::Charts Qt6::Widgets)

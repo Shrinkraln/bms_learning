@@ -8,6 +8,7 @@
 #include "can/CanWorker.h"
 #include "model/BmsDataModel.h"
 #include "protocol/CsvLogger.h"
+#include "model/CommunicationMonitor.h"
 
 // QSettings::value/setValue 是普通 C++ 方法 (非 slot/Q_INVOKABLE)，QML 无法直接调用，
 // 故用薄封装桥接，向 QML 暴露 settings 上下文属性。
@@ -57,6 +58,10 @@ int main(int argc, char *argv[])
     bmsModel.setCanWorker(&canWorker);
     bmsModel.setCsvLogger(&csvLogger);
 
+    CommunicationMonitor commMonitor;
+    commMonitor.setCanWorker(&canWorker);
+    commMonitor.setBmsModel(&bmsModel);
+
     QObject::connect(&canWorker, &CanWorker::batchReady,
                      &bmsModel, &BmsDataModel::onBatchReady);
     QObject::connect(&canWorker, &CanWorker::connectionStatusChanged,
@@ -67,6 +72,7 @@ int main(int argc, char *argv[])
                      &bmsModel, &BmsDataModel::onCanError);
 
     engine.rootContext()->setContextProperty("bms", &bmsModel);
+    engine.rootContext()->setContextProperty("commMonitor", &commMonitor);
 
     // 窗口几何等持久化设置 (main.qml 通过 settings.value/setValue 读写)
     QSettings *settings = new QSettings(&app);

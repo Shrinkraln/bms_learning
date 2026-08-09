@@ -13,6 +13,7 @@ class CanWorker : public QObject {
 public:
     explicit CanWorker(QObject *parent = nullptr);
     ~CanWorker();
+    int reconnectCount() const { return m_reconnectCount; }
 
 public slots:
     void start(const QString &plugin, const QString &interface, int bitrate);
@@ -24,6 +25,7 @@ signals:
     void connectionStatusChanged(bool connected);       // CAN 总线帧活动 (500ms 超时)
     void deviceConnectedChanged(bool connected);        // PCAN 设备物理连接 (new)
     void errorOccurred(const QString &errorString);
+    void reconnectCountChanged(int count);
 
 private slots:
     void onFramesReceived();
@@ -44,6 +46,7 @@ private:
     int m_reconnectAttempt = 0;
     bool m_timedOut = false;
     bool m_deviceConnected = false;
+    int m_reconnectCount = 0;
     static constexpr int TIMEOUT_MS = 500;
     static constexpr int RECONNECT_MS = 2000;
 };
