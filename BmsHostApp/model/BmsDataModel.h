@@ -62,6 +62,7 @@ public:
     bool balancing() const { return m_snap.balancing; }
     int connectionStatus() const { return m_connStatus; }
     bool canBusConnected() const { return m_canBusConnected; }
+    bool afeOnline() const { return m_snap.afe_online; }
     QString statusText() const { return m_statusText; }
     QString lastUpdate() const { return m_lastUpdate; }
     qreal avgTempC() const { return m_avgTempC; }
