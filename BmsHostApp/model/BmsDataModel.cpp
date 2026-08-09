@@ -74,6 +74,14 @@ void BmsDataModel::applySnapshot(const BmsSnapshot &snap)
 
 #undef UPDATE_PROP
 
+    // AFE 在线状态同步到 m_snap (供 afeOnline() getter 使用)。
+    // 注意: BmsSnapshot::afe_online 默认 true, 若不同步, m_snap 中该字段永不更新,
+    // afeOnline() 将恒返回 true (无法检测 AFE 离线)。
+    if (m_snap.afe_online != snap.afe_online) {
+        m_snap.afe_online = snap.afe_online;
+        changed = true;
+    }
+
     // 更新列表模型
     for (int i = 0; i < 9; ++i) {
         bool isMax = (snap.cell_mv[i] == snap.cell_max_mv && snap.cell_max_mv > 0);
