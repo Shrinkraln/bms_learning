@@ -65,9 +65,9 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* ---- Step 2: printf 重定向到 USART1 ---- */
+/* ---- printf 重定向到 USART2 (debug 输出) ---- */
 int __io_putchar(int ch) {
-    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
     return ch;
 }
 /* USER CODE END 0 */
@@ -108,8 +108,8 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* ---- printf 重定向到 USART1 ---- */
-  /* (__io_putchar 定义在 USER CODE 0 区) */
+  /* ---- printf 重定向到 USART2 (debug 输出) ---- */
+  /* (__io_putchar 定义在 USER CODE 0 区, 使用 huart2) */
   printf("BMS starting...\r\n");
   /* USER CODE END 2 */
 

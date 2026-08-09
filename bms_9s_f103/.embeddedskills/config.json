@@ -1,0 +1,14 @@
+{
+  "gcc": {
+    "project": "bms_9s_f103",
+    "preset": "Debug",
+    "log_dir": "bms_9s_f103/.embeddedskills/build"
+  },
+  "openocd": {
+    "board": "",
+    "interface": "interface/stlink.cfg",
+    "target": "target/stm32f1x.cfg",
+    "adapter_speed": "",
+    "transport": ""
+  }
+}
