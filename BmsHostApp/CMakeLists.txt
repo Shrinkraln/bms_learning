@@ -21,6 +21,7 @@ qt_add_executable(BmsHostApp
     model/CellVoltageModel.h model/CellVoltageModel.cpp
     model/TemperatureModel.h model/TemperatureModel.cpp
     model/FaultListModel.h model/FaultListModel.cpp
+    model/CommunicationMonitor.h model/CommunicationMonitor.cpp
 )
 
 # Qt policy: QTP0001 NEW — QML 资源前缀为 ':/qt/qml/' (main.cpp 加载 qrc:/qt/qml/com/bms/host/qml/main.qml)
