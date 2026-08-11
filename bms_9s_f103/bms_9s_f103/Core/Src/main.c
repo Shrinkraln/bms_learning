@@ -33,6 +33,7 @@
 #include "usart.h"
 #include "usart_drv.h"
 #include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -69,6 +70,12 @@ void MX_FREERTOS_Init(void);
 int __io_putchar(int ch) {
     HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
     return ch;
+}
+
+/* ---- 调试输出: 直接 HAL 发送，绕过 printf 缓冲区 ---- */
+void dbg_out(const char *s) {
+    if (s == NULL) { return; }
+    HAL_UART_Transmit(&huart2, (uint8_t *)s, (uint16_t)strlen(s), HAL_MAX_DELAY);
 }
 /* USER CODE END 0 */
 
@@ -108,9 +115,22 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* ---- printf 重定向到 USART2 (debug 输出) ---- */
-  /* (__io_putchar 定义在 USER CODE 0 区, 使用 huart2) */
+  /* ---- 启动标记 + 打印复位原因 ---- */
+  {
+      uint32_t csr = RCC->CSR;
+      const char *src = "UNKNOWN";
+      if (csr & RCC_CSR_IWDGRSTF)  { src = "IWDG"; }
+      else if (csr & RCC_CSR_WWDGRSTF) { src = "WWDG"; }
+      else if (csr & RCC_CSR_PORRSTF)  { src = "POR"; }
+      else if (csr & RCC_CSR_PINRSTF)  { src = "PIN"; }
+      else if (csr & RCC_CSR_SFTRSTF)  { src = "SW"; }
+      else if (csr & RCC_CSR_LPWRRSTF) { src = "LPWR"; }
+      printf("RST=%s ", src);
+      /* 清除全部复位标志 (写 RMVF=1 清 CSR) */
+      SET_BIT(RCC->CSR, RCC_CSR_RMVF);
+  }
   printf("BMS starting...\r\n");
+  fflush(stdout);
   /* USER CODE END 2 */
 
   /* Init scheduler */

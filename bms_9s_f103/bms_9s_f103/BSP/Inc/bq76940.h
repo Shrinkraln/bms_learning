@@ -49,53 +49,57 @@ extern "C" {
  * ============================================================ */
 
 #define BQ76940_REG_SYS_STAT     0x00U   /**< 系统状态                     */
-#define BQ76940_REG_CELLBAL1     0x06U   /**< 电芯均衡 1 (VC1-VC5)         */
-#define BQ76940_REG_CELLBAL2     0x07U   /**< 电芯均衡 2 (VC6-VC10)        */
+#define BQ76940_REG_CELLBAL1     0x01U   /**< 电芯均衡 1 (VC1-VC5)         */
+#define BQ76940_REG_CELLBAL2     0x02U   /**< 电芯均衡 2 (VC6-VC10)        */
+#define BQ76940_REG_CELLBAL3     0x03U   /**< 电芯均衡 3 (VC11-VC15)       */
 #define BQ76940_REG_SYS_CTRL1    0x04U   /**< 系统控制 1                   */
 #define BQ76940_REG_SYS_CTRL2    0x05U   /**< 系统控制 2                   */
+#define BQ76940_REG_PROTECT1     0x06U   /**< 保护配置 1 (SCD)             */
+#define BQ76940_REG_PROTECT2     0x07U   /**< 保护配置 2 (OCD)             */
+#define BQ76940_REG_PROTECT3     0x08U   /**< 保护配置 3 (OV/UV 延时)      */
+#define BQ76940_REG_OV_TRIP      0x09U   /**< 过压触发阈值                  */
+#define BQ76940_REG_UV_TRIP      0x0AU   /**< 欠压触发阈值                  */
 #define BQ76940_REG_CC_CFG       0x0BU   /**< 库仑计配置                   */
 
-#define BQ76940_REG_OV_TRIP      0x08U   /**< 过压触发阈值 (14-bit)        */
-#define BQ76940_REG_UV_TRIP      0x0AU   /**< 欠压触发阈值 (14-bit)        */
-#define BQ76940_REG_OCD_TRIP     0x0CU   /**< 过流放电触发阈值              */
-#define BQ76940_REG_SCD_TRIP     0x0EU   /**< 短路放电触发阈值              */
-
-#define BQ76940_REG_OV_DELAY     0x09U   /**< 过压延时                      */
-#define BQ76940_REG_UV_DELAY     0x0BU   /**< 欠压延时 (注: 与 UV_TRIP+1 同地址) */
-#define BQ76940_REG_OCD_DELAY    0x0DU   /**< 过流放电延时                  */
-#define BQ76940_REG_SCD_DELAY    0x0FU   /**< 短路放电延时                  */
-
-#define BQ76940_REG_VC1_LO       0x20U   /**< VC1 电压低字节                */
-#define BQ76940_REG_BAT_LO       0x34U   /**< 总电压低字节 (BAT)           */
-#define BQ76940_REG_TS1_LO       0x36U   /**< TS1 温度低字节               */
-#define BQ76940_REG_CC_LO        0x3CU   /**< 库仑计低字节                 */
+#define BQ76940_REG_VC1_HI       0x0CU   /**< VC1 电压高字节 (起始, 数据手册地址) */
+#define BQ76940_REG_BAT_HI       0x2AU   /**< 总电压高字节 (BAT)           */
+#define BQ76940_REG_BAT_LO       0x2BU   /**< 总电压低字节                  */
+#define BQ76940_REG_TS1_HI       0x2CU   /**< TS1 温度高字节               */
+#define BQ76940_REG_TS1_LO       0x2DU   /**< TS1 温度低字节               */
+#define BQ76940_REG_TS2_HI       0x2EU   /**< TS2 温度高字节               */
+#define BQ76940_REG_TS2_LO       0x2FU   /**< TS2 温度低字节               */
+#define BQ76940_REG_TS3_HI       0x30U   /**< TS3 温度高字节               */
+#define BQ76940_REG_TS3_LO       0x31U   /**< TS3 温度低字节               */
+#define BQ76940_REG_CC_HI        0x32U   /**< 库仑计高字节                 */
+#define BQ76940_REG_CC_LO        0x33U   /**< 库仑计低字节                 */
 
 #define BQ76940_REG_ADCGAIN1     0x50U   /**< ADC 增益 1                   */
-#define BQ76940_REG_ADCGAIN2     0x59U   /**< ADC 增益 2 (仅 GAIN bit)     */
+#define BQ76940_REG_ADCGAIN2     0x59U   /**< ADC 增益 2                   */
 #define BQ76940_REG_ADCOFFSET    0x51U   /**< ADC 偏移                     */
-
-#define BQ76940_REG_PROTECT1     0x6AU   /**< 保护状态 1 (SCD/OCD)         */
-#define BQ76940_REG_PROTECT2     0x6BU   /**< 保护状态 2 (OV/UV)           */
 
 /* ============================================================
  * 系统控制位定义
  * ============================================================ */
 
-#define BQ76940_SYS_CTRL1_ADC_EN     (1U << 0U)  /**< ADC 使能              */
-#define BQ76940_SYS_CTRL1_CC_EN      (1U << 1U)  /**< 库仑计使能            */
+#define BQ76940_SYS_CTRL1_SHUT_B    (1U << 0U)  /**< 关机序列位 B (bit0)       */
+#define BQ76940_SYS_CTRL1_SHUT_A    (1U << 1U)  /**< 关机序列位 A (bit1)       */
 #define BQ76940_SYS_CTRL1_TEMP_SEL   (1U << 3U)  /**< 温度传感器选择 (1=外部NTC) */
-#define BQ76940_SYS_CTRL1_ADC_EN2    (1U << 4U)  /**< ADC 使能 2            */
-#define BQ76940_SYS_CTRL1_CC_ONESHOT (1U << 6U)  /**< 库仑计单次            */
+#define BQ76940_SYS_CTRL1_ADC_EN     (1U << 4U)  /**< ADC 使能 (bit4)           */
 
-#define BQ76940_SYS_CTRL2_CHG_FET    (1U << 0U)  /**< 充电 FET 控制          */
-#define BQ76940_SYS_CTRL2_DSG_FET    (1U << 1U)  /**< 放电 FET 控制          */
+#define BQ76940_SYS_CTRL2_CHG_ON    (1U << 0U)  /**< 充电 FET 使能              */
+#define BQ76940_SYS_CTRL2_DSG_ON    (1U << 1U)  /**< 放电 FET 使能              */
+#define BQ76940_SYS_CTRL2_CC_ONESHOT (1U << 5U) /**< 库仑计单次触发             */
+#define BQ76940_SYS_CTRL2_CC_EN     (1U << 6U)  /**< 库仑计连续使能             */
+#define BQ76940_SYS_CTRL2_DELAY_DIS (1U << 7U)  /**< 保护延时旁路 (测试用)     */
 
-/** @brief 系统状态位 */
-#define BQ76940_STAT_OV      (1U << 0U)
-#define BQ76940_STAT_UV      (1U << 1U)
-#define BQ76940_STAT_OCD     (1U << 2U)
-#define BQ76940_STAT_SCD     (1U << 3U)
-#define BQ76940_STAT_DEV_XRDY (1U << 7U)
+/** @brief 系统状态位 (SYS_STAT 0x00) */
+#define BQ76940_STAT_OCD     (1U << 0U)
+#define BQ76940_STAT_SCD     (1U << 1U)
+#define BQ76940_STAT_OV      (1U << 2U)
+#define BQ76940_STAT_UV      (1U << 3U)
+#define BQ76940_STAT_OVRD    (1U << 4U)
+#define BQ76940_STAT_DEV_XREADY (1U << 5U)  /**< 芯片内部故障 (1=故障)     */
+#define BQ76940_STAT_CC_READY (1U << 7U)    /**< 库仑计数据就绪             */
 
 /* ============================================================
  * 类型定义
@@ -186,7 +190,7 @@ const bq76940_calib_t *bq76940_get_calib(void);
 
 /**
  * @brief  写 SYS_CTRL2 寄存器（FET 控制）
- * @param  mask   位掩码 (BQ76940_SYS_CTRL2_CHG_FET | BQ76940_SYS_CTRL2_DSG_FET)
+ * @param  mask   位掩码 (BQ76940_SYS_CTRL2_CHG_ON | BQ76940_SYS_CTRL2_DSG_ON)
  * @param  value  位值 (1=开启, 0=关闭)
  * @retval 操作状态
  */

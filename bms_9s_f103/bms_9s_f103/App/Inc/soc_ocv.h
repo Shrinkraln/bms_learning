@@ -52,7 +52,7 @@ typedef struct {
 } ocv_soc_point_t;
 
 /** @brief OCV-SOC 曲线点数 */
-#define SOC_OCV_TABLE_SIZE  21U
+#define SOC_OCV_TABLE_SIZE  31U
 
 /** @brief SOC 估算上下文 (≤64B) */
 typedef struct {

@@ -30,7 +30,7 @@ extern osSemaphoreId_t sem_sample;
 
 /* 故障掩码 */
 #define ALL_FAULTS      0x0FFFU
-#define PROT_RECOVERED  0x0001U
+#define PROT_RECOVERED  0x8000U   /* bit15: 与 FAULT_CELL_OV(bit0) 解冲突 */
 
 void bms_app_init(void);
 

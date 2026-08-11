@@ -1,5 +1,6 @@
 #include "BmsProtocolDecoder.h"
 #include <QDebug>
+#include <QHash>
 #include <cstring>
 
 Q_LOGGING_CATEGORY(bmsProto, "bms.protocol")
@@ -32,12 +33,14 @@ QVector<BmsSnapshot> BmsProtocolDecoder::decodeFrames(const QVector<CanFrame> &b
     bool has_temp      = false;
     bool has_soc       = false;
 
+    // 诊断: 统计本批次中各 CAN ID 的帧数
+    QHash<quint32, int> idCounts;
+    for (const auto &f : batch) { idCounts[f.id]++; }
+
     for (const auto &f : batch) {
         switch (f.id) {
         case ID_BMS_FAULT:
             if (checkDlc(f, 8)) {
-                // 故障帧为事件驱动 (保护进入/恢复时发送, 头插队列先于周期帧到达),
-                // 仅携带保护字段 — 合并进快照, 不能整体替换 (会丢失 cell/状态数据)
                 const BmsSnapshot s2 = decodeFaultFrame(f);
                 snap.prot_level    = s2.prot_level;
                 snap.active_faults = s2.active_faults;
@@ -54,8 +57,6 @@ QVector<BmsSnapshot> BmsProtocolDecoder::decodeFrames(const QVector<CanFrame> &b
             break;
         case ID_BMS_STATUS2:
             if (checkDlc(f, 8)) {
-                // 固件周期发送顺序: 0x110/0x111 先于 0x120 (can_pub 每 100ms 一批)。
-                // STATUS 帧整体替换会清空 cell 帧已累积的 cell 0-7 — 保留并合并。
                 BmsSnapshot s2 = decodeStatusFrame(f);
                 for (int i = 0; i < 8; ++i) { s2.cell_mv[i] = snap.cell_mv[i]; }
                 s2.active_faults = snap.active_faults;
@@ -70,6 +71,36 @@ QVector<BmsSnapshot> BmsProtocolDecoder::decodeFrames(const QVector<CanFrame> &b
             if (checkDlc(f, 8)) { snap = decodeSocOcvFrame(f, snap); has_soc = true; }
             break;
         default: break;
+        }
+    }
+
+    // 诊断: 当有 STATUS 帧但缺少 CELL_VOLT_1_4 时告警 (C1-C4 不显示)
+    if (has_status && !has_cells_1_4) {
+        static int c1c4WarnCount = 0;
+        if (++c1c4WarnCount <= 5 || c1c4WarnCount % 50 == 0) {
+            qCWarning(bmsProto, "C1-C4 MISSING: 0x110 not in batch (count=%d). "
+                      "Batch IDs: %s",
+                      c1c4WarnCount,
+                      [&idCounts]() {
+                          QStringList parts;
+                          for (auto it = idCounts.cbegin(); it != idCounts.cend(); ++it)
+                              parts.append(QString("0x%1×%2").arg(it.key(), 3, 16, QChar('0')).arg(it.value()));
+                          return parts.join(", ").toUtf8();
+                      }().constData());
+        }
+    }
+    if (has_status && !has_cells_5_8) {
+        static int c5c8WarnCount = 0;
+        if (++c5c8WarnCount <= 5 || c5c8WarnCount % 50 == 0) {
+            qCWarning(bmsProto, "C5-C8 MISSING: 0x111 not in batch (count=%d). "
+                      "Batch IDs: %s",
+                      c5c8WarnCount,
+                      [&idCounts]() {
+                          QStringList parts;
+                          for (auto it = idCounts.cbegin(); it != idCounts.cend(); ++it)
+                              parts.append(QString("0x%1×%2").arg(it.key(), 3, 16, QChar('0')).arg(it.value()));
+                          return parts.join(", ").toUtf8();
+                      }().constData());
         }
     }
 

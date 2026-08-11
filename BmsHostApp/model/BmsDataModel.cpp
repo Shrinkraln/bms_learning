@@ -7,9 +7,11 @@ BmsDataModel::BmsDataModel(QObject *parent) : QObject(parent)
     m_timer.setInterval(30);
     connect(&m_timer, &QTimer::timeout, this, [this]() {
         if (m_pendingBatch.isEmpty()) return;
-        // latest-wins
+        // 累积窗口: PCAN 可能将同一批帧分多次交付,
+        // latest-wins 会在 chunk 之间丢失帧 (如 0x110)
         auto batch = std::move(m_pendingBatch);
         m_pendingBatch.clear();
+        m_pendingBatch.reserve(32); // 预分配下一窗口
         auto snaps = BmsProtocolDecoder::decodeFrames(batch);
         if (!snaps.isEmpty()) {
             applySnapshot(snaps.last());
@@ -20,7 +22,21 @@ BmsDataModel::BmsDataModel(QObject *parent) : QObject(parent)
 
 void BmsDataModel::onBatchReady(const QVector<CanFrame> &batch)
 {
-    m_pendingBatch = batch; // latest-wins
+    // 累积追加 — PCAN 可能将同一轮帧分多次交付,
+    // 直接替换会在 chunk 边界丢失前一次已入队的帧
+    // 上限保护: 单周期 5 帧 × 10 倍裕量 = 50 帧
+    if (m_pendingBatch.size() + batch.size() <= 50) {
+        m_pendingBatch.append(batch);
+    } else {
+        // 异常堆积 → 强制消费旧批次, 保留新帧
+        auto old = std::move(m_pendingBatch);
+        m_pendingBatch.clear();
+        m_pendingBatch = batch;
+        auto snaps = BmsProtocolDecoder::decodeFrames(old);
+        if (!snaps.isEmpty()) {
+            applySnapshot(snaps.last());
+        }
+    }
 }
 
 void BmsDataModel::onConnectionChanged(bool connected)

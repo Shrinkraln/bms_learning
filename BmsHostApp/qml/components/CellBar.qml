@@ -12,49 +12,71 @@ Item {
     property real minRange: 2800
     property real maxRange: 4300
 
-    Column {
-        anchors.fill: parent
-        spacing: 4
+    // 计算柱高度 (可用区间 4~120 px)
+    function barHeight(): real {
+        if (voltage <= 0) return 4   // 无数据时显示占位条
+        var h = (voltage - minRange) / (maxRange - minRange) * 116 + 4
+        return Math.max(4, Math.min(120, h))
+    }
 
-        // 标记
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: isMax ? "*" : isMin ? "_" : ""
-            font.pixelSize: 14; font.bold: true
-            color: isMax ? "#e74c3c" : "#3498db"
-            visible: isMax || isMin
-        }
+    // 数值是否有意义
+    property bool hasData: voltage > 0
 
-        // 电压值
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: (voltage / 1000).toFixed(3) + "V"
-            font.pixelSize: 10; color: "#333"
-        }
+    // ---- 顶部: 状态标志 (MAX / MIN) ----
+    Text {
+        id: statusFlag
+        anchors.top: parent.top
+        anchors.topMargin: 2
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: isMax ? "▲ MAX" : isMin ? "▼ MIN" : ""
+        font.pixelSize: 10; font.bold: true
+        color: isMax ? "#e74c3c" : isMin ? "#3498db" : "transparent"
+        visible: isMax || isMin
+        height: visible ? implicitHeight : 0
+    }
 
-        // 柱
-        Rectangle {
-            anchors.horizontalCenter: parent.horizontalCenter
-            width: 32; height: {
-                var h = (voltage - minRange) / (maxRange - minRange) * 120
-                return Math.max(2, Math.min(120, h))
+    // ---- 电压数值 ----
+    Text {
+        id: voltageText
+        anchors.top: statusFlag.visible ? statusFlag.bottom : parent.top
+        anchors.topMargin: statusFlag.visible ? 1 : 4
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: hasData ? (voltage / 1000).toFixed(3) + "V" : "---"
+        font.pixelSize: 10
+        color: hasData ? "#333" : "#bbb"
+    }
+
+    // ---- 电芯编号 (底部固定, 保证对齐) ----
+    Text {
+        id: cellLabel
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 2
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: "C" + cellIndex
+        font.pixelSize: 11; font.bold: true
+        color: "#555"
+    }
+
+    // ---- 柱状条 (从 cellLabel 向上增长, 底部固定不跳动) ----
+    Rectangle {
+        id: bar
+        anchors.bottom: cellLabel.top
+        anchors.bottomMargin: 4
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: 32
+        height: barHeight()
+        color: hasData ? barColor : "#d0d0d0"
+        radius: 3
+
+        // 平滑过渡 — 仅动画高度, 底部 anchor 固定不动
+        Behavior on height {
+            SmoothedAnimation {
+                duration: 150
+                velocity: 80
             }
-            y: {
-                var h = (voltage - minRange) / (maxRange - minRange) * 120
-                return 120 - Math.max(2, Math.min(120, h))
-            }
-            color: barColor
-            radius: 3
-            Behavior on height { NumberAnimation { duration: 300 } }
-            Behavior on y { NumberAnimation { duration: 300 } }
         }
-
-        // 编号
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "C" + cellIndex
-            font.pixelSize: 11; font.bold: true
-            color: "#555"
+        Behavior on color {
+            ColorAnimation { duration: 200 }
         }
     }
 }

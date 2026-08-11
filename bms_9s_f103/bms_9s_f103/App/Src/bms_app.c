@@ -13,10 +13,15 @@
 #include "i2c_sw.h"
 #include "can_drv.h"
 #include "timer.h"
+#include "tim.h"
 #include "wdg.h"
 #include "bq76940.h"
 #include "protection.h"
 #include "ring_buf.h"
+#include <stdio.h>
+
+/* 调试输出函数 (定义于 main.c USER CODE 0, USART2 直发) */
+extern void dbg_out(const char *s);
 
 /* ============================================================
  * 同步原语 (全局 — stm32f1xx_it.c 需要 sem_sample)
@@ -66,13 +71,33 @@ static void task_can_tx_entry(void *arg);
 void bms_app_init(void)
 {
     /* ---- 1. BSP 层初始化 ---- */
+    dbg_out("[INIT] BSP start\r\n");
     bsp_tick_init();
+    /* IWDG 必须最先初始化: 上轮复位后 IWDG 仍运行, 必须在超时前踢狗 */
+    wdg_init(1000U);
     led_init();
     io_ctrl_init();
+    dbg_out("[INIT] i2c_sw...\r\n");
     i2c_sw_init();
+    /* ---- 唤醒 BQ76940: TS1 上升沿 (数据手册: SHIP→Normal) ---- */
+    io_ctrl_set(IO_ID_WAKE_BQ, IO_LEVEL_LOW);
+    bsp_delay_us(50U);
+    io_ctrl_set(IO_ID_WAKE_BQ, IO_LEVEL_HIGH);
+    bsp_delay_us(500U);
+    io_ctrl_set(IO_ID_WAKE_BQ, IO_LEVEL_LOW);
+    bsp_delay_ms(50U);
+    /* TS1 唤醒后等 2s 让 DEVICE_XREADY 瞬态结束, 分段延时+喂狗 */
+    for (uint8_t i = 0U; i < 20U; i++) {
+        bsp_delay_ms(100U);
+        wdg_kick();
+    }
+    dbg_out("[INIT] can_drv...\r\n");
     can_drv_init();
+    dbg_out("[INIT] timer...\r\n");
     timer_init();
-    wdg_init(1000U);
+    HAL_TIM_Base_Start_IT(&htim2);  /* 启动 TIM2 计数器 (100ms 周期) */
+    dbg_out("[INIT] TIM2 started\r\n");
+    dbg_out("[INIT] BSP done\r\n");
 
     /* ---- 2. 创建同步原语 ---- */
     mutex_iic      = osMutexNew(NULL);
@@ -101,24 +126,35 @@ void bms_app_init(void)
         .discharge_oc_ma = 30000U,
         .charge_oc_ma    = 15000U,
     };
-    (void)bq76940_init(&bq_cfg);
+    dbg_out("[INIT] RTOS objs done, BQ76940...\r\n");
+    {
+        bq76940_status_t bq_rc = bq76940_init(&bq_cfg);
+        if (bq_rc == BQ76940_OK) {
+            dbg_out("[INIT] BQ76940 OK\r\n");
+        } else {
+            char bq_err[32];
+            snprintf(bq_err, sizeof(bq_err), "[INIT] BQ76940 ERROR(%d)\r\n", (int)bq_rc);
+            dbg_out(bq_err);
+        }
+    }
 
     protection_init();
     can_cmd_init();
 
     /* ---- 5. 创建 6 个任务 ---- */
+    dbg_out("[INIT] creating tasks...\r\n");
     const osThreadAttr_t sample_attr = {
-        .name = "sample", .stack_size = 512U, .priority = osPriorityAboveNormal };
+        .name = "sample", .stack_size = 2048U, .priority = osPriorityAboveNormal };
     const osThreadAttr_t protect_attr = {
-        .name = "protect", .stack_size = 256U, .priority = osPriorityRealtime };
+        .name = "protect", .stack_size = 1024U, .priority = osPriorityRealtime };
     const osThreadAttr_t can_rx_attr = {
-        .name = "canRx", .stack_size = 256U, .priority = osPriorityNormal };
+        .name = "canRx", .stack_size = 1024U, .priority = osPriorityNormal };
     const osThreadAttr_t balance_attr = {
-        .name = "balance", .stack_size = 256U, .priority = osPriorityBelowNormal };
+        .name = "balance", .stack_size = 1024U, .priority = osPriorityBelowNormal };
     const osThreadAttr_t soc_attr = {
-        .name = "soc", .stack_size = 512U, .priority = osPriorityBelowNormal };
+        .name = "soc", .stack_size = 2048U, .priority = osPriorityBelowNormal };
     const osThreadAttr_t can_tx_attr = {
-        .name = "canTx", .stack_size = 256U, .priority = osPriorityLow };
+        .name = "canTx", .stack_size = 1024U, .priority = osPriorityLow };
 
     (void)osThreadNew(task_protect_entry, NULL, &protect_attr);
     (void)osThreadNew(task_sample_entry,  NULL, &sample_attr);
@@ -126,6 +162,11 @@ void bms_app_init(void)
     (void)osThreadNew(task_balance_entry, NULL, &balance_attr);
     (void)osThreadNew(task_soc_entry,     NULL, &soc_attr);
     (void)osThreadNew(task_can_tx_entry,  NULL, &can_tx_attr);
+
+    dbg_out("[INIT] 6 tasks created\r\n");
+
+    /* 首次唤醒 task_protect: 确认 DEVICE_XREADY 已清除 + 同步 FET 状态 */
+    osEventFlagsSet(evt_protect, PROT_RECOVERED);
 
     led_on();
 }
@@ -138,9 +179,9 @@ static void task_sample_entry(void *arg)
 {
     (void)arg;
     bq76940_data_t data;
-
     for (;;) {
         osSemaphoreAcquire(sem_sample, osWaitForever);  /* ← TIM2 ISR 唤醒 */
+        dbg_out("[SAMPLE] start\r\n");
 
         /* ① 获取 I2C 总线 */
         osMutexAcquire(mutex_iic, osWaitForever);
@@ -153,10 +194,54 @@ static void task_sample_entry(void *arg)
                 g_afe_online = 0U;
             }
             osMutexRelease(mutex_iic);
+            { char b[40]; int n = snprintf(b, sizeof(b),
+                "[SAMPLE] I2C fail (%d/3)\r\n", comm_err_cnt);
+              if (n>0) dbg_out(b); }
             continue;
         }
         comm_err_cnt = 0U;
         g_afe_online = 1U;
+
+        /* ---- 数据诊断: 输出关键采样值 + CC 原始寄存器 ---- */
+        {
+            /* 回读 CC 原始寄存器 + SYS_CTRL2 + SYS_STAT 确诊 */
+            uint8_t cc_raw[2] = {0, 0};
+            uint8_t ctrl2 = 0U, sys_stat = 0U;
+            i2c_sw_read_buf(BQ76940_I2C_ADDR, 0x32U, cc_raw, 2U);
+            bq76940_reg_read(0x05U, &ctrl2);
+            bq76940_reg_read(0x00U, &sys_stat);
+
+            /* 每周期自愈: DEVICE_XREADY + CC_ONESHOT 触发 */
+            uint8_t wr_st = 0U, wr_ctrl = 0U, wr_cc = 0U;
+            if ((sys_stat & 0x20U) || ((ctrl2 & 0x03U) != 0x03U)) {
+                wr_st  = (uint8_t)bq76940_reg_write(BQ76940_REG_SYS_STAT, 0x20U);
+                /* CHG+DSG + CC_ONESHOT (单次 250ms 转换, 不依赖 CC_EN) */
+                uint8_t oneshot = BQ76940_SYS_CTRL2_CHG_ON
+                                | BQ76940_SYS_CTRL2_DSG_ON
+                                | BQ76940_SYS_CTRL2_CC_ONESHOT;
+                wr_ctrl = (uint8_t)bq76940_reg_write(BQ76940_REG_SYS_CTRL2, oneshot);
+                g_fet_chg_on = 1U;
+                g_fet_dsg_on = 1U;
+                bq76940_reg_read(0x05U, &ctrl2);
+                bq76940_reg_read(0x00U, &sys_stat);
+            }
+            /* CC_READY 检测: 转换完成 → 清除标志 (下次自动触发新的 one-shot) */
+            if (sys_stat & 0x80U) {
+                wr_cc = (uint8_t)bq76940_reg_write(BQ76940_REG_SYS_STAT, 0x80U);
+            }
+
+            char b[192]; int n = snprintf(b, sizeof(b),
+                "[DATA] C1=%u C2=%u C3=%u C4=%u C5=%u C6=%u C7=%u C8=%u C9=%u "
+                "tot=%lu cur=%ld | CC=%02X%02X ctrl2=%02X stat=%02X"
+                " wr(st=%d ctrl=%d cc=%d)\r\n",
+                data.cells.cell_mv[0], data.cells.cell_mv[1], data.cells.cell_mv[2],
+                data.cells.cell_mv[3], data.cells.cell_mv[4], data.cells.cell_mv[5],
+                data.cells.cell_mv[6], data.cells.cell_mv[7], data.cells.cell_mv[8],
+                (unsigned long)data.cells.total_mv, (long)data.current.current_ma,
+                cc_raw[0], cc_raw[1], ctrl2, sys_stat,
+                wr_st, wr_ctrl, wr_cc);
+            if (n > 0) { dbg_out(b); }
+        }
 
         /* ② settings 快照 (零初始化: 锁超时时阈值为 0, 跳过所有检查) */
         bms_settings_t snapshot;
@@ -199,6 +284,8 @@ static void task_sample_entry(void *arg)
 
         osMutexRelease(mutex_data);
         osMutexRelease(mutex_iic);
+
+        dbg_out("[SAMPLE] end\r\n");
     }
 }
 
@@ -215,38 +302,48 @@ static void task_protect_entry(void *arg)
         uint32_t flags = osEventFlagsWait(evt_protect,
                                            ALL_FAULTS | PROT_RECOVERED,
                                            osFlagsWaitAny, osWaitForever);
+        dbg_out("[PROTECT] waken\r\n");
 
         /* ① 获取 I2C 总线 */
         osMutexAcquire(mutex_iic, osWaitForever);
+
+        /* ①a 检查并清除 DEVICE_XREADY (必须在写 SYS_CTRL2 之前, 否则 FET 写无效) */
+        {
+            uint8_t stat;
+            if (bq76940_reg_read(BQ76940_REG_SYS_STAT, &stat) == BQ76940_OK
+             && (stat & 0x20U)) {
+                (void)bq76940_reg_write(BQ76940_REG_SYS_STAT, 0x20U);
+            }
+        }
 
         /* ② 读取保护状态 (无需持 mutex_data: sample 已写完并释放) */
         bms_shared_t *bms = bms_shared_get_ptr();
         uint16_t faults    = bms->active_faults;
         prot_level_t level = bms->prot_level;
 
-        uint8_t ctrl2_mask = (uint8_t)(BQ76940_SYS_CTRL2_CHG_FET
-                                       | BQ76940_SYS_CTRL2_DSG_FET);
+        uint8_t ctrl2_mask = (uint8_t)(BQ76940_SYS_CTRL2_CHG_ON
+                                       | BQ76940_SYS_CTRL2_DSG_ON);
         uint8_t ctrl2_val  = 0U;
 
         if (flags & PROT_RECOVERED) {
             /* ③ 故障恢复: 全开 FET */
-            ctrl2_val = (uint8_t)(BQ76940_SYS_CTRL2_CHG_FET
-                                  | BQ76940_SYS_CTRL2_DSG_FET);
+            ctrl2_val = (uint8_t)(BQ76940_SYS_CTRL2_CHG_ON
+                                  | BQ76940_SYS_CTRL2_DSG_ON);
         } else if (level >= PROT_LVL_FAULT) {
             /* ④ 严重故障: 全关 */
             ctrl2_val = 0U;
         } else if (level == PROT_LVL_ALERT) {
             if (faults & (FAULT_CELL_OV | FAULT_PACK_OV | FAULT_CHARGE_OC)) {
-                ctrl2_val = BQ76940_SYS_CTRL2_DSG_FET;  /* 关充电, 保留放电 */
+                ctrl2_val = BQ76940_SYS_CTRL2_DSG_ON;  /* 关充电, 保留放电 */
             } else if (faults & (FAULT_CELL_UV | FAULT_PACK_UV)) {
-                ctrl2_val = BQ76940_SYS_CTRL2_CHG_FET;  /* 关放电, 保留充电 */
+                ctrl2_val = BQ76940_SYS_CTRL2_CHG_ON;  /* 关放电, 保留充电 */
             }
         }
 
         bq76940_write_sys_ctrl2(ctrl2_mask, ctrl2_val);
         /* 同步 FET 状态到全局 (供 can_pub 的 0x120 ctrl 字节读取) */
-        g_fet_chg_on = (ctrl2_val & BQ76940_SYS_CTRL2_CHG_FET) ? 1U : 0U;
-        g_fet_dsg_on = (ctrl2_val & BQ76940_SYS_CTRL2_DSG_FET) ? 1U : 0U;
+        g_fet_chg_on = (ctrl2_val & BQ76940_SYS_CTRL2_CHG_ON) ? 1U : 0U;
+        g_fet_dsg_on = (ctrl2_val & BQ76940_SYS_CTRL2_DSG_ON) ? 1U : 0U;
         osMutexRelease(mutex_iic);
 
         /* ⑤ 生成故障 CAN 帧 (新 layout: uint16 电压, 无电流) */
@@ -282,6 +379,8 @@ static void task_protect_entry(void *arg)
         osMutexAcquire(mutex_can_tx, osWaitForever);
         ring_buf_put_front(&q_can_tx, &fault_frame);
         osMutexRelease(mutex_can_tx);
+
+        dbg_out("[PROTECT] end\r\n");
     }
 }
 
@@ -296,6 +395,7 @@ static void task_can_rx_entry(void *arg)
 
     for (;;) {
         osDelay(50U);
+        dbg_out("[CAN_RX] start\r\n");
 
         while (can_available() > 0U) {
             if (can_recv(&msg) != 0U) { continue; }
@@ -319,21 +419,21 @@ static void task_can_rx_entry(void *arg)
                 bq76940_clear_faults();
                 break;
             case CAN_ACTION_FET_CHG_ON:
-                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_FET,
-                                         BQ76940_SYS_CTRL2_CHG_FET);
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_ON,
+                                         BQ76940_SYS_CTRL2_CHG_ON);
                 g_fet_chg_on = 1U;
                 break;
             case CAN_ACTION_FET_CHG_OFF:
-                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_FET, 0U);
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_CHG_ON, 0U);
                 g_fet_chg_on = 0U;
                 break;
             case CAN_ACTION_FET_DSG_ON:
-                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_FET,
-                                         BQ76940_SYS_CTRL2_DSG_FET);
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_ON,
+                                         BQ76940_SYS_CTRL2_DSG_ON);
                 g_fet_dsg_on = 1U;
                 break;
             case CAN_ACTION_FET_DSG_OFF:
-                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_FET, 0U);
+                bq76940_write_sys_ctrl2(BQ76940_SYS_CTRL2_DSG_ON, 0U);
                 g_fet_dsg_on = 0U;
                 break;
             case CAN_ACTION_BALANCE_SET:
@@ -356,6 +456,7 @@ static void task_can_rx_entry(void *arg)
                 break;
             }
         }
+        dbg_out("[CAN_RX] end\r\n");
     }
 }
 
@@ -372,6 +473,7 @@ static void task_balance_entry(void *arg)
 
     for (;;) {
         osDelay(500U);
+        dbg_out("[BALANCE] start\r\n");
 
         bms_shared_t *bms = bms_shared_data_lock(10U);
         if (bms == NULL) { continue; }
@@ -409,6 +511,7 @@ static void task_balance_entry(void *arg)
         } else {
             bms_shared_data_unlock();
         }
+        dbg_out("[BALANCE] end\r\n");
     }
 }
 
@@ -427,12 +530,17 @@ static void task_soc_entry(void *arg)
 
     for (;;) {
         osDelay(1000U);
+        dbg_out("[SOC] start\r\n");
 
         bms_shared_t *bms = bms_shared_data_lock(10U);
         if (bms == NULL) { continue; }
 
-        uint16_t cell_min  = bms->battery_val.cells.min_mv;
-        int32_t  current   = bms->battery_val.current.current_ma;
+        /* 使用平均电芯电压做 OCV 查表 (total_mv / 9)，
+         * 避免单颗落后电芯绑架整包 SOC 估算 */
+        uint16_t cell_avg = (uint16_t)(bms->battery_val.cells.total_mv
+                                       / BQ76940_CELL_COUNT);
+        /* CC 不可用, 传 0 强制纯 OCV 模式 (不依赖电流的安时积分) */
+        int32_t  current  = 0L;
 
         bms_shared_data_unlock();
 
@@ -441,12 +549,14 @@ static void task_soc_entry(void *arg)
         last_ms = now;
 
         /* SOC/OCV 更新 (3 参数, 无 temp_mdeg) */
-        soc_ocv_update(cell_min, current, dt_ms);
+        soc_ocv_update(cell_avg, current, dt_ms);
 
         /* 写回共享数据 */
         bms_shared_update_soc(soc_ocv_get_soc(),
                               soc_ocv_get_ocv(),
                               soc_ocv_get_remaining_mah());
+
+        dbg_out("[SOC] end\r\n");
     }
 }
 
@@ -460,6 +570,7 @@ static void task_can_tx_entry(void *arg)
 
     for (;;) {
         osDelay(100U);
+        dbg_out("[CAN_TX] start\r\n");
 
         /* 喂狗 (最低优先级任务兼) */
         wdg_kick();
@@ -493,5 +604,6 @@ static void task_can_tx_entry(void *arg)
             if (avail == 0U || ret != 0U) { break; }
             can_send(&frame);
         }
+        dbg_out("[CAN_TX] end\r\n");
     }
 }

@@ -46,7 +46,7 @@ void i2c_sw_init(void)
 
     GPIO_InitStruct.Pin = I2C_SW_SCL_PIN | I2C_SW_SDA_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;     /* 使能内部上拉 (~40kΩ)，兼容无外部上拉 */
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(I2C_SW_SCL_PORT, &GPIO_InitStruct);
 

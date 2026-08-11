@@ -25,7 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "bms_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,7 +51,7 @@
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -114,8 +114,12 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* defaultTask 已移除 — BMS 任务由 bms_app_init() 创建 */
-  (void)argument;
+  /* ---- BMS 应用初始化（调度器已启动，任务可立即运行）---- */
+  extern void dbg_out(const char *s);
+  dbg_out("[BOOT] defaultTask start\r\n");
+  bms_app_init();
+  dbg_out("[BOOT] bms_app_init done\r\n");
+  /* 初始化完成后本任务退出，仅保留 6 个 BMS 工作线程 */
   osThreadExit();
   /* USER CODE END StartDefaultTask */
 }

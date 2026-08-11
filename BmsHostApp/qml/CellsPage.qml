@@ -15,18 +15,33 @@ Page {
         GroupBox {
             title: "电芯电压 (" + bms.cellDiff + " mV 压差)"
             Layout.fillWidth: true; Layout.preferredHeight: 260
+
             RowLayout {
                 anchors.fill: parent
                 spacing: 4
-                // Y 轴标签
-                Column {
-                    Layout.preferredWidth: 40
-                    Repeater {
-                        model: ["4.3V","4.0V","3.7V","3.4V","3.1V","2.8V"]
-                        Text { text: modelData; font.pixelSize: 9; color: "#999"
-                               height: 20 }
+
+                // Y 轴标签 — 与 bar 可视区域对齐 (bar 范围 120px, 从 y≈58 到 y≈178)
+                Item {
+                    Layout.preferredWidth: 36
+                    Layout.fillHeight: true
+
+                    Column {
+                        anchors.top: parent.top
+                        anchors.topMargin: 58   // 对齐 bar 顶部 (4300mV 对应 bar.top)
+                        spacing: 0
+                        Repeater {
+                            model: ["4.3V","4.0V","3.7V","3.4V","3.1V","2.8V"]
+                            Text {
+                                text: modelData
+                                font.pixelSize: 9; color: "#999"
+                                width: 36; height: 20
+                                verticalAlignment: Text.AlignVCenter
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
                     }
                 }
+
                 // 电芯柱
                 RowLayout {
                     spacing: 6

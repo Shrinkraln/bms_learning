@@ -22,16 +22,16 @@ extern "C" {
  * 引脚配置 (可根据实际硬件修改)
  * ============================================================ */
 
-/** @brief 软件 I2C SCL 引脚 — PB10 (与 HW I2C1 PB8/PB9 错开) */
+/** @brief 软件 I2C SCL 引脚 — PB8 (与 CubeMX I2C1 共用，i2c_sw_init 会覆盖为 GPIO 模式) */
 #define I2C_SW_SCL_PORT      GPIOB
-#define I2C_SW_SCL_PIN       GPIO_PIN_10
+#define I2C_SW_SCL_PIN       GPIO_PIN_8
 
-/** @brief 软件 I2C SDA 引脚 — PB11 */
+/** @brief 软件 I2C SDA 引脚 — PB9 */
 #define I2C_SW_SDA_PORT      GPIOB
-#define I2C_SW_SDA_PIN       GPIO_PIN_11
+#define I2C_SW_SDA_PIN       GPIO_PIN_9
 
 /** @brief I2C 时序延时参数（72MHz 系统时钟下） */
-#define I2C_SW_DELAY_US      5U    /**< 半周期延时 → ~100kHz SCL */
+#define I2C_SW_DELAY_US      10U   /**< 半周期延时 → ~50kHz SCL（容错性更好） */
 
 /* ============================================================
  * 类型定义

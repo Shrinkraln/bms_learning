@@ -178,40 +178,20 @@ bq76940_status_t bq76940_init(const bq76940_cfg_t *cfg)
 {
     uint8_t reg_val = 0U;
 
-    /* 1. 探测设备是否存在 */
+    /* 1. 探测设备 */
     if (i2c_sw_probe(BQ76940_I2C_ADDR) != I2C_SW_OK) {
         return BQ76940_I2C_ERROR;
     }
 
-    /* 2. 检查 DEV_XRDY — 等待设备就绪 */
-    uint32_t start = bsp_tick_get();
-    do {
-        if (bq76940_reg_read(BQ76940_REG_SYS_STAT, &reg_val) != BQ76940_OK) {
-            return BQ76940_I2C_ERROR;
-        }
-        if (reg_val & BQ76940_STAT_DEV_XRDY) {
-            break;
-        }
-        bsp_delay_ms(10U);
-    } while (!bsp_tick_is_timeout(start, 500U));
-
-    if (!(reg_val & BQ76940_STAT_DEV_XRDY)) {
-        return BQ76940_TIMEOUT;
-    }
+    /* 2. 等待设备启动完成 (t_BOOTREADY≈10ms + t_I2CSTARTUP≈1ms,
+     *    TS1 脉冲后已在外层等待 2s 让 DEVICE_XREADY 瞬态结束) */
+    bsp_delay_ms(10U);
 
     /* 3. 读取 ADC 校准值 (ADCGAIN1, ADCGAIN2, ADCOFFSET) */
     uint8_t adcgain1 = 0U, adcgain2 = 0U, adcoffset = 0U;
 
-    if (bq76940_reg_read(BQ76940_REG_ADCGAIN1, &adcgain1) == BQ76940_OK
-     && bq76940_reg_read(BQ76940_REG_ADCGAIN2, &adcgain2) == BQ76940_OK) {
-        /* GAIN = 365 + ADCGAIN<4:0>
-         * ADCGAIN1[4:0] 为低 5 位 */
-        uint8_t adcgain = adcgain1 & 0x1FU;
-        g_calib.gain_uv_per_lsb = (uint16_t)(365U + (uint16_t)adcgain);
-    } else {
-        /* 回退默认值 */
-        g_calib.gain_uv_per_lsb = BQ76940_ADC_UV_PER_LSB;
-    }
+    (void)adcgain1; (void)adcgain2;
+    g_calib.gain_uv_per_lsb = BQ76940_ADC_UV_PER_LSB;  /* 强制默认 382µV/LSB */
 
     if (bq76940_reg_read(BQ76940_REG_ADCOFFSET, &adcoffset) == BQ76940_OK) {
         /* OFFSET 为 2's complement int8, 单位 mV */
@@ -227,9 +207,8 @@ bq76940_status_t bq76940_init(const bq76940_cfg_t *cfg)
         g_r_sense_mohm = BQ76940_DEFAULT_R_SENSE_MOHM;
     }
 
-    /* 5. 配置 SYS_CTRL1: ADC_EN + CC_EN + TEMP_SEL=1 (外部 NTC) */
+    /* 5. 配置 SYS_CTRL1: ADC_EN + TEMP_SEL=1 (外部 NTC) */
     reg_val = BQ76940_SYS_CTRL1_ADC_EN
-            | BQ76940_SYS_CTRL1_CC_EN
             | BQ76940_SYS_CTRL1_TEMP_SEL;
     if (bq76940_reg_write(BQ76940_REG_SYS_CTRL1, reg_val) != BQ76940_OK) {
         return BQ76940_I2C_ERROR;
@@ -252,6 +231,17 @@ bq76940_status_t bq76940_init(const bq76940_cfg_t *cfg)
         if (bq76940_set_protection(&default_cfg) != BQ76940_OK) {
             return BQ76940_I2C_ERROR;
         }
+    }
+
+    /* 7. 清除 DEVICE_XREADY + 初始化 SYS_CTRL2: 先开 FET, CC 后续独立处理 */
+    {
+        /* 必须先清 DEVICE_XREADY, 否则 SYS_CTRL2 写入无效 */
+        (void)bq76940_reg_write(BQ76940_REG_SYS_STAT, 0x20U);
+
+        /* 仅写 CHG + DSG (CC 留在 task_sample 自愈中处理) */
+        uint8_t ctrl2_init = BQ76940_SYS_CTRL2_CHG_ON
+                           | BQ76940_SYS_CTRL2_DSG_ON;
+        (void)bq76940_reg_write(BQ76940_REG_SYS_CTRL2, ctrl2_init);
     }
 
     return BQ76940_OK;
@@ -283,7 +273,7 @@ bq76940_status_t bq76940_shutdown(void)
 {
     uint8_t ctrl1 = 0U;
 
-    i2c_sw_status_t ret = i2c_sw_read_crc(BQ76940_I2C_ADDR,
+    i2c_sw_status_t ret = i2c_sw_read_reg(BQ76940_I2C_ADDR,
                                            BQ76940_REG_SYS_CTRL1, &ctrl1);
     if (ret != I2C_SW_OK) {
         return BQ76940_I2C_ERROR;
@@ -291,7 +281,7 @@ bq76940_status_t bq76940_shutdown(void)
 
     ctrl1 |= (1U << 4U);  /* SHUTDOWN bit */
 
-    ret = i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_SYS_CTRL1, ctrl1);
+    ret = i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_SYS_CTRL1, ctrl1);
     if (ret != I2C_SW_OK) {
         return BQ76940_I2C_ERROR;
     }
@@ -308,7 +298,7 @@ bq76940_status_t bq76940_write_sys_ctrl2(uint8_t mask, uint8_t value)
     uint8_t ctrl2 = 0U;
 
     /* 读取当前值 */
-    i2c_sw_status_t ret = i2c_sw_read_crc(BQ76940_I2C_ADDR,
+    i2c_sw_status_t ret = i2c_sw_read_reg(BQ76940_I2C_ADDR,
                                            BQ76940_REG_SYS_CTRL2, &ctrl2);
     if (ret != I2C_SW_OK) {
         return BQ76940_I2C_ERROR;
@@ -317,7 +307,7 @@ bq76940_status_t bq76940_write_sys_ctrl2(uint8_t mask, uint8_t value)
     /* 修改指定位 */
     ctrl2 = (ctrl2 & ~mask) | (value & mask);
 
-    ret = i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_SYS_CTRL2, ctrl2);
+    ret = i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_SYS_CTRL2, ctrl2);
     if (ret != I2C_SW_OK) {
         return BQ76940_I2C_ERROR;
     }
@@ -380,24 +370,30 @@ bq76940_status_t bq76940_read_cells(bq76940_cell_data_t *cells)
     int32_t gain = (int32_t)g_calib.gain_uv_per_lsb;
     int16_t offset = g_calib.offset_mv;
 
-    /* 批量读取电芯电压寄存器: VC1_LO(0x20) ~ VC9_HI (共 9×2=18 字节) */
-    uint8_t buf[18];
-    i2c_sw_status_t ret = i2c_sw_read_buf(BQ76940_I2C_ADDR,
-                                           BQ76940_REG_VC1_LO,
-                                           buf, 18U);
-    if (ret != I2C_SW_OK) {
-        cells->valid = 0U;
-        return BQ76940_I2C_ERROR;
-    }
+    /* 9-cell BQ76940 VC 映射 (数据手册 9-cell 连接表)
+     * Cell 1:VC1(0x0C)  Cell 2:VC2(0x0E)  Cell 3:VC5(0x14)
+     * Cell 4:VC6(0x16)  Cell 5:VC7(0x18)  Cell 6:VC10(0x1E)
+     * Cell 7:VC11(0x20) Cell 8:VC12(0x22) Cell 9:VC15(0x28) */
+    static const uint8_t cell_reg[BQ76940_CELL_COUNT] = {
+        0x0CU, 0x0EU, 0x14U, 0x16U, 0x18U, 0x1EU, 0x20U, 0x22U, 0x28U
+    };
 
-    /* 解析 14 位 ADC 值 → mV (使用校准值) */
     cells->max_mv = 0U;
     cells->min_mv = 0xFFFFU;
     cells->total_mv = 0U;
 
     for (uint8_t i = 0U; i < BQ76940_CELL_COUNT; i++) {
-        uint8_t lo = buf[i * 2U];
-        uint8_t hi = buf[i * 2U + 1U];
+        uint8_t pair[2];
+        /* 逐对读取 (芯片不支持大块连续读) */
+        i2c_sw_status_t ret = i2c_sw_read_buf(BQ76940_I2C_ADDR,
+                                               cell_reg[i], pair, 2U);
+        if (ret != I2C_SW_OK) {
+            cells->valid = 0U;
+            return BQ76940_I2C_ERROR;
+        }
+
+        uint8_t hi = pair[0];   /* 低地址 = HI 字节 */
+        uint8_t lo = pair[1];   /* 高地址 = LO 字节 */
 
         /* 14-bit: hi[5:0] | lo[7:0] */
         uint16_t adc = (uint16_t)(((uint16_t)(hi & 0x3FU) << 8U) | lo);
@@ -431,7 +427,7 @@ bq76940_status_t bq76940_read_temps(bq76940_temp_data_t *temps)
     }
 
     for (uint8_t i = 0U; i < BQ76940_TS_COUNT; i++) {
-        uint8_t reg = (uint8_t)(BQ76940_REG_TS1_LO + (i * 2U));
+        uint8_t reg = (uint8_t)(BQ76940_REG_TS1_HI + (i * 2U));
         uint8_t buf[2];
 
         i2c_sw_status_t ret = i2c_sw_read_buf(BQ76940_I2C_ADDR, reg, buf, 2U);
@@ -440,7 +436,7 @@ bq76940_status_t bq76940_read_temps(bq76940_temp_data_t *temps)
             return BQ76940_I2C_ERROR;
         }
 
-        uint16_t adc = (uint16_t)(((uint16_t)(buf[1] & 0x3FU) << 8U) | buf[0]);
+        uint16_t adc = (uint16_t)(((uint16_t)(buf[0] & 0x3FU) << 8U) | buf[1]);
 
         /* ADC → NTC 温度 (0.1°C) */
         temps->ts_mdeg_c[i] = adc_to_ntc_temp(adc);
@@ -460,17 +456,20 @@ bq76940_status_t bq76940_read_current(bq76940_current_data_t *current)
         return BQ76940_ERROR;
     }
 
-    /* 读取库仑计 CC_LO/HI (0x3C-0x3D) */
+    /* 读取库仑计 CC_HI/LO (0x32-0x33) */
     uint8_t buf[2];
     i2c_sw_status_t ret = i2c_sw_read_buf(BQ76940_I2C_ADDR,
-                                           BQ76940_REG_CC_LO, buf, 2U);
+                                           BQ76940_REG_CC_HI, buf, 2U);
     if (ret != I2C_SW_OK) {
         current->valid = 0U;
         return BQ76940_I2C_ERROR;
     }
 
+    /* 读后清除 CC_READY 标志 (SYS_STAT bit7, 写 1 清零) */
+    (void)bq76940_reg_write(BQ76940_REG_SYS_STAT, 0x80U);
+
     /* CC 为 16 位有符号值 */
-    int16_t cc_raw = (int16_t)(((uint16_t)buf[1] << 8U) | buf[0]);
+    int16_t cc_raw = (int16_t)(((uint16_t)buf[0] << 8U) | buf[1]);
 
     /* I_mA = CC_raw × 844 / (R_sense_mΩ × 100)
      * 注意: 844 = 8.44μV × 100, 避免浮点 */
@@ -518,7 +517,7 @@ bq76940_status_t bq76940_read_faults(bq76940_fault_t *faults)
     faults->ut = (prot2 >> 3U) & 1U;
 
     /* SYS_STAT */
-    faults->dev_xrdy = (sys_stat >> 7U) & 1U;
+    faults->dev_xrdy = (sys_stat >> 5U) & 1U;  /* bit5 = DEVICE_XREADY */
 
     return BQ76940_OK;
 }
@@ -535,62 +534,29 @@ bq76940_status_t bq76940_set_protection(const bq76940_cfg_t *cfg)
 
     int32_t gain = (int32_t)g_calib.gain_uv_per_lsb;
 
-    /* 过压阈值: OV_TRIP = V_ov(mV) × 1000 / GAIN */
+    /* OV_TRIP (0x09): 单字节, 14-bit ADC 的中间 8 位 (bits 11:4)
+     * OV_T = (OV_TRIP_FULL >> 4) & 0xFF  */
     if (cfg->cell_ov_mv > 0U) {
-        uint16_t ov_adc = (uint16_t)((uint32_t)cfg->cell_ov_mv * 1000U
-                                     / (uint32_t)gain);
-        if (ov_adc > BQ76940_ADC_MAX) { ov_adc = BQ76940_ADC_MAX; }
-
-        uint8_t ov_lo = (uint8_t)(ov_adc & 0xFFU);
-        uint8_t ov_hi = (uint8_t)((ov_adc >> 8U) & 0xFFU);
-
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_OV_TRIP,     ov_lo);
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_OV_TRIP + 1U, ov_hi);
+        uint32_t ov_adc = (uint32_t)cfg->cell_ov_mv * 1000U / (uint32_t)gain;
+        uint8_t ov_t = (uint8_t)((ov_adc >> 4U) & 0xFFU);
+        i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_OV_TRIP, ov_t);
     }
 
-    /* 欠压阈值 */
+    /* UV_TRIP (0x0A): 同上编码方式 */
     if (cfg->cell_uv_mv > 0U) {
-        uint16_t uv_adc = (uint16_t)((uint32_t)cfg->cell_uv_mv * 1000U
-                                     / (uint32_t)gain);
-        if (uv_adc > BQ76940_ADC_MAX) { uv_adc = BQ76940_ADC_MAX; }
-
-        uint8_t uv_lo = (uint8_t)(uv_adc & 0xFFU);
-        uint8_t uv_hi = (uint8_t)((uv_adc >> 8U) & 0xFFU);
-
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_UV_TRIP,     uv_lo);
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_UV_TRIP + 1U, uv_hi);
+        uint32_t uv_adc = (uint32_t)cfg->cell_uv_mv * 1000U / (uint32_t)gain;
+        uint8_t uv_t = (uint8_t)((uv_adc >> 4U) & 0xFFU);
+        i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_UV_TRIP, uv_t);
     }
 
-    /* 过流放电阈值: OCD_TRIP = I_ocd(mA) × R_sense(mΩ) / 8.44μV
-     * 简化为: OCD_raw = I_ocd × R_sense / 844 × 100 */
-    if (cfg->discharge_oc_ma > 0U && g_r_sense_mohm > 0U) {
-        uint16_t ocd_raw = (uint16_t)((uint32_t)cfg->discharge_oc_ma
-                                      * (uint32_t)g_r_sense_mohm
-                                      * 100U / 844U);
+    /* PROTECT1 (0x06): RSNS=0, SCD delay=100μs, SCD threshold=44mV (minimum) */
+    i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_PROTECT1, 0x01U);
 
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_OCD_TRIP,
-                         (uint8_t)(ocd_raw & 0xFFU));
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_OCD_TRIP + 1U,
-                         (uint8_t)((ocd_raw >> 8U) & 0xFFU));
-    }
+    /* PROTECT2 (0x07): OCD delay=8ms, OCD threshold=17mV (RSNS=0) */
+    i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_PROTECT2, 0x00U);
 
-    /* 短路放电阈值 */
-    if (cfg->charge_oc_ma > 0U) {
-        /* 短路电流通常远大于 OCD, 使用粗略估算 */
-        uint16_t scd_raw = 0x0010U;  /* 默认最小值 */
-        (void)cfg->charge_oc_ma;     /* 使用字段保持接口兼容 */
-
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_SCD_TRIP,
-                         (uint8_t)(scd_raw & 0xFFU));
-        i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_SCD_TRIP + 1U,
-                         (uint8_t)((scd_raw >> 8U) & 0xFFU));
-    }
-
-    /* 延时寄存器 (写默认值) */
-    i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_OV_DELAY,  0x80U);  /* ~1s */
-    i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_UV_DELAY,  0x80U);  /* ~1s */
-    i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_OCD_DELAY, 0x08U);  /* ~8ms */
-    i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_SCD_DELAY, 0x01U);  /* ~100μs */
+    /* PROTECT3 (0x08): UV delay=4s, OV delay=2s */
+    i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_PROTECT3, 0x50U);
 
     return BQ76940_OK;
 }
@@ -614,10 +580,10 @@ bq76940_status_t bq76940_set_balancing(uint16_t balance_mask)
 
     i2c_sw_status_t ret;
 
-    ret = i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL1, bal1);
+    ret = i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL1, bal1);
     if (ret != I2C_SW_OK) { return BQ76940_I2C_ERROR; }
 
-    ret = i2c_sw_write_crc(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL2, bal2);
+    ret = i2c_sw_write_reg(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL2, bal2);
     if (ret != I2C_SW_OK) { return BQ76940_I2C_ERROR; }
 
     return BQ76940_OK;
@@ -627,8 +593,8 @@ uint16_t bq76940_get_balancing(void)
 {
     uint8_t bal1 = 0U, bal2 = 0U;
 
-    i2c_sw_read_crc(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL1, &bal1);
-    i2c_sw_read_crc(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL2, &bal2);
+    i2c_sw_read_reg(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL1, &bal1);
+    i2c_sw_read_reg(BQ76940_I2C_ADDR, BQ76940_REG_CELLBAL2, &bal2);
 
     return (uint16_t)(((uint16_t)bal2 << 5U) | (bal1 & 0x1FU));
 }
@@ -644,7 +610,8 @@ bq76940_status_t bq76940_balance_off(void)
 
 bq76940_status_t bq76940_reg_write(uint8_t reg, uint8_t data)
 {
-    i2c_sw_status_t ret = i2c_sw_write_crc(BQ76940_I2C_ADDR, reg, data);
+    /* 使用无 CRC 模式 — 适配非 CRC 版本 BQ7694000/4002 */
+    i2c_sw_status_t ret = i2c_sw_write_reg(BQ76940_I2C_ADDR, reg, data);
 
     switch (ret) {
         case I2C_SW_OK:        return BQ76940_OK;
@@ -656,7 +623,8 @@ bq76940_status_t bq76940_reg_write(uint8_t reg, uint8_t data)
 
 bq76940_status_t bq76940_reg_read(uint8_t reg, uint8_t *data)
 {
-    i2c_sw_status_t ret = i2c_sw_read_crc(BQ76940_I2C_ADDR, reg, data);
+    /* 使用无 CRC 模式 — 适配非 CRC 版本 BQ7694000/4002 */
+    i2c_sw_status_t ret = i2c_sw_read_reg(BQ76940_I2C_ADDR, reg, data);
 
     switch (ret) {
         case I2C_SW_OK:        return BQ76940_OK;
