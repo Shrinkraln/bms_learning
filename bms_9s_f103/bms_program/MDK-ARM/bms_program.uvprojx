@@ -599,9 +599,23 @@
         </Group>
         <Group>
           <GroupName>BSP/Inc</GroupName>
+          <Files>
+            <File>
+              <FileName>bsp_iic.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\BSP\Inc\bsp_iic.h</FilePath>
+            </File>
+          </Files>
         </Group>
         <Group>
           <GroupName>BSP/Src</GroupName>
+          <Files>
+            <File>
+              <FileName>bsp_iic.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\Src\bsp_iic.c</FilePath>
+            </File>
+          </Files>
         </Group>
         <Group>
           <GroupName>App/Inc</GroupName>
