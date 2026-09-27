@@ -4,14 +4,43 @@
 
 #### 功能0 初始化bq
 
-目标：控制iic发送初始化bq；设置SYS_CTRL寄存器位
+目标：控制iic发送初始化bq；设置SYS_CTRL寄存器位；以及检查当前通讯状态是否正常；引脚唤醒bq；以及后续的bq
 
 需求：iic
+
+识别概念：//LOAD_PRESENT当前是否有负载 //ADC使能OV和温度 //TEMP_SEL外部内部温度电阻选择 //DELAY_DIS延迟设置 //CC_EN库伦计数器连续读取使能 //CC_ONESHOT库伦计数器单次采样使能 //CHG_ON DSG_ON当前充放电
 
 数据类型：
 
 ```c
-void bsp_
+typedef struct{
+    bool adc_en,
+    bool temp_sel,
+    bool delay_dis,
+    bool cc_en,
+    bool cc_oneshot
+} bq_init_t;
+bq_init_t bq_init{
+    .adc_en =...tbc
+};
+//当前bq状态机，设备状态机还未设置
+typedef enum{
+    bms_new 0x00,
+    bms_inited 0x01,	//成功创建并且iic通信没有异常
+    bms_erri2c 0x02,
+    //bms_errcan 0x04,	//can是bms的
+    bms_errbq 0x08,		//具体错误需要查看后续protect的
+    bms_load 0x10,
+    bms_unload 0x20,
+    bms_chg 0x40,
+    bms_dsg 0x80
+}bms_sta_t;
+bms_sta_t g_bms_sta;
+void app_bq_init(void);	//创建状态机
+void app_bq_wake(void); //引脚唤醒
+bool app_bq_i2c_test(void);
+
+
 ```
 
 #### 功能1 硬件定时器触发采样
