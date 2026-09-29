@@ -1062,7 +1062,7 @@ void BMS_STA(void)
 /****************************************
 fuction:void readbqstate(void)
 description:读取报警信号值
-Parameters: UV_Alarm_flagOV_Alarm_flag
+Parameters: UV_Alarm_flag,OOV_Alarm_flag
             SCD_Alarm_flag,OCD_Alarm_flag
 ******************************************/
 

@@ -1,13 +1,13 @@
 /******************** (C) BOBO   ********************************
- * 文件名  ：main.c
- * 描述    ：主要是完成BMS相关检测和保护
- * 库版本  ：V3.50
- * 作者    ：BOBO
- * 版本更新: 2019-04-12
- * 调试方式：J-Link
+ * ?????  ??main.c
+ * ????    ??????????BMS?????????
+ * ??汾  ??V3.50
+ * ????    ??BOBO
+ * ?汾????: 2019-04-12
+ * ????????J-Link
 **********************************************************************************/
 
-//头文件
+//????
 #include "stm32f10x.h"
 #include "led.h"
 #include "wdg.h"
@@ -33,7 +33,7 @@
   * @retval None
   */
 	
-/* 存储数据Flash页首地址 60K 为首地址，即留给程序代码的空间有60K大小，103C8T6的FLASH的大小有62K*，每个地址递增一页，也就是+0X802*/
+/* ?洢????Flash????? 60K ?????????????????????????60K??С??103C8T6??FLASH???С??62K*?????????????????????+0X802*/
     uint32_t   Battery_ADR     =  0x08007800 ;  
     uint32_t   Temp_up         =  0x08007C00 ; 		
 		
@@ -41,16 +41,16 @@
 		 
 	void Write_Flash(uint32_t Add,unsigned int Data)
 	{	
-		  FLASH_Unlock();		/* 每次擦除Flash中数据时得先解锁 */
-      FLASH_ErasePage(Add);		  /* 擦除页 */		
-		  FLASH_ProgramWord(Add,Data);   /* 写16位半字 */
-		  FLASH_Lock();							   /* 上锁 */		  
+		  FLASH_Unlock();		/* ??β???Flash?????????????? */
+      FLASH_ErasePage(Add);		  /* ????? */		
+		  FLASH_ProgramWord(Add,Data);   /* д16λ???? */
+		  FLASH_Lock();							   /* ???? */		  
 	}
 	
 unsigned int Read_Flash(uint32_t Add)
 	{	
 		unsigned int Data;
-		Data=*(vu16*)(Add);	 /* 读取地址中的16位数据 */ 
+		Data=*(vu16*)(Add);	 /* ???????е?16λ???? */ 
 		return Data;
 	}		
 unsigned char SEND_readparameter_TO_SHANGWEIJI[500]={0XAA,0X88};
@@ -150,29 +150,29 @@ extern UV_Alarm_flag,OV_Alarm_flag,SCD_Alarm_flag,OCD_Alarm_flag,OT_Alarm_flag,U
 extern int Batteryval[50];
 int main(void)
 {
-    SYSTICK_Init(); //系统初始化，时钟配置；
-	  NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2); //设置NVIC中断分组2:2位抢占优先级，2位响应优先级
+    SYSTICK_Init(); //?????????????????
+	  NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2); //????NVIC?ж????2:2λ??????????2λ????????
     delay_ms(1000);
-	  uart_init(115200);	 //串口初始化为115200   
-	  USART2_Config();    //蓝牙串口初始化为9600
-    LED_GPIO_Config();//电量显示，4个LED设置；
-    IO_CTRL_Config(); //系统的一些IO口设置；	   
-	  I2C1_Configuration();  //BQ76940_1的IIC配置；
-	  CAN_Mode_Init(CAN_SJW_1tq,CAN_BS2_8tq,CAN_BS1_9tq,4,CAN_Mode_Normal);//CAN初始化环回模式,波特率500Kbps    
+	  uart_init(115200);	 //?????????115200   
+	  USART2_Config();    //?????????????9600
+    LED_GPIO_Config();//?????????4??LED?????
+    IO_CTRL_Config(); //?????ЩIO???????	   
+	  I2C1_Configuration();  //BQ76940_1??IIC?????
+	  CAN_Mode_Init(CAN_SJW_1tq,CAN_BS2_8tq,CAN_BS1_9tq,4,CAN_Mode_Normal);//CAN???????????,??????500Kbps    
 
-	  BQ76930_config();      //BQ76940的初始化，唤醒设备，OV,UV,SCD,OCD的配置；	
+	  BQ76930_config();      //BQ76940?????????????豸??OV,UV,SCD,OCD???????	
 	  LED4_ONOFF(1) ;
-   	TIM2_Config(99,7199);//100mS定时器中断
+   	TIM2_Config(99,7199);//100mS??????ж?
 	  UartSend("MODE_CFG(1);DIR(1);FSIMG(2097152,0,0,220,176,0);\r\n");
 	  delay_ms(1000);   	
     UartSend("CLR(61);\r\n");
-	  IWDG_Init(6,1250);      //看门狗4S左右
+	  IWDG_Init(6,1250);      //?????4S????
     while (1)
     {	
 	   IWDG_Feed();
 		 LEDXToggle(1);
 		key=Can_Receive_Msg(canbuf);
-		if(key)//接收到有数据
+		if(key)//???????????
 		{			
  			for(u=0;u<key;u++)
 			{
@@ -185,7 +185,7 @@ int main(void)
 			if((Batteryval[0]>4200)||(Batteryval[1]>4200)||(Batteryval[4]>4200)||(Batteryval[5]>4200)||(Batteryval[6]>4200)||(Batteryval[9]>4200)||(Batteryval[10]>4200)||(Batteryval[11]>4200)||(Batteryval[14]>4200))
 					{
 						Only_Close_CHG();                        //
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态
+						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????
 						OV_FLAG=1;
 					}
      if(OV_FLAG==1)
@@ -193,7 +193,7 @@ int main(void)
 					if((Batteryval[0]<4100)&&(Batteryval[1]<4100)&&(Batteryval[4]<4100)&&(Batteryval[5]<4100)&&(Batteryval[6]<4100)&&(Batteryval[9]<4100)&&(Batteryval[10]<4100)&&(Batteryval[11]<4100)&&(Batteryval[14]<4100))
 					{
 						Only_Open_CHG();                         //
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态
+						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????
 						OV_FLAG=0;
 					}
 			}
@@ -202,7 +202,7 @@ int main(void)
 					if((Batteryval[0]<2800)||(Batteryval[1]<2800)||(Batteryval[4]<2800)||(Batteryval[5]<2800)||(Batteryval[6]<2800)||(Batteryval[9]<2800)||(Batteryval[10]<2800)||(Batteryval[11]<2800)||(Batteryval[14]<2800))
 					{
 						Only_Close_DSG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态
+						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????
 						UV_FLAG=1;
 					}
           if(UV_FLAG==1)
@@ -210,31 +210,31 @@ int main(void)
 					if((Batteryval[0]>2800)&&(Batteryval[1]>2800)&&(Batteryval[4]>2800)&&(Batteryval[5]>2800)&&(Batteryval[6]>2800)&&(Batteryval[9]>2800)&&(Batteryval[10]>2800)&&(Batteryval[11]>2800)&&(Batteryval[14]>2800))
 					{
 						Only_Open_DSG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态
+						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????
             UV_FLAG=0;						
 					}
 		     }
-			if(Batteryval[17]>2000)//如果电流大于2000ma，关闭充放电MOS管
+			if(Batteryval[17]>2000)//???????????2000ma????????MOS??
 			{
 			      Close_DSG_CHG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态	
+						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????	
 				    OC_FLAG=1;
 			}
 			if( OC_FLAG==1)
 			{
-						if(Batteryval[17]<2000)//如果电流大于2000ma，关闭充放电MOS管
+						if(Batteryval[17]<2000)//???????????2000ma????????MOS??
 						{
 									Open_DSG_CHG();
-									IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态	
+									IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????	
 									OC_FLAG=0;
 						}
 						
 			}
 			
-						if(Batteryval[18]>Read_Flash(Temp_up))//如果电流大于2000ma，关闭充放电MOS管
+						if(Batteryval[18]>Read_Flash(Temp_up))//???????????2000ma????????MOS??
 			{
 			      Close_DSG_CHG();
-						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态	
+						IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????	
 
 				    Temp_up_flag = 1;
 			}
@@ -243,7 +243,7 @@ int main(void)
 			  if(Batteryval[18]<Read_Flash(Temp_up))
 				{
 					  Open_DSG_CHG();
-											IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //清除状态	
+											IIC1_write_one_byte_CRC(SYS_STAT,0xFF); //?????	
 
 				    Temp_up_flag = 0;
 					

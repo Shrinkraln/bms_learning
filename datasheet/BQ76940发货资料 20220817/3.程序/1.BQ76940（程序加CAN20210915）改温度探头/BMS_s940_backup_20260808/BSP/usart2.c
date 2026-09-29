@@ -39,11 +39,11 @@ void USART1_Config( void )
   // Waiting TX empty
   while( !( USART1->SR & USART_FLAG_TXE ) );      //??????
   // print \r
-  USART1->DR = ( '\r' & ( unsigned short )0x01FF );//??“\r”
+  USART1->DR = ( '\r' & ( unsigned short )0x01FF );//??¡°\r¡±
   // Waiting TX empty
   while( !( USART1->SR & USART_FLAG_TXE ) );
   // print \n
-  USART1->DR = ( '\n' & ( unsigned short )0x01FF );//??“\n”,?????
+  USART1->DR = ( '\n' & ( unsigned short )0x01FF );//??¡°\n¡±,?????
  }
  
 unsigned char USART1_Printf( unsigned char* const pucText, unsigned int uiLength, unsigned char ucUnit )
@@ -217,11 +217,11 @@ void USART2_Config( void )
   // Waiting TX empty
   while( !( USART2->SR & USART_FLAG_TXE ) );      //??????
   // print \r
-  USART2->DR = ( '\r' & ( unsigned short )0x01FF );//??“\r?
+  USART2->DR = ( '\r' & ( unsigned short )0x01FF );//??¡°\r?
   // Waiting TX empty
   while( !( USART2->SR & USART_FLAG_TXE ) );
   // print \n
-  USART2->DR = ( '\n' & ( unsigned short )0x01FF );//??“\n??????
+  USART2->DR = ( '\n' & ( unsigned short )0x01FF );//??¡°\n??????
  }
  
 
@@ -384,11 +384,11 @@ void USART3_Config( void )
   // Waiting TX empty
   while( !( USART3->SR & USART_FLAG_TXE ) );      //??????
   // print \r
-  USART3->DR = ( '\r' & ( unsigned short )0x01FF );//??“\r?
+  USART3->DR = ( '\r' & ( unsigned short )0x01FF );//??¡°\r?
   // Waiting TX empty
   while( !( USART3->SR & USART_FLAG_TXE ) );
   // print \n
-  USART3->DR = ( '\n' & ( unsigned short )0x01FF );//??“\n??????
+  USART3->DR = ( '\n' & ( unsigned short )0x01FF );//??¡°\n??????
  }
  
 unsigned char USART3_Printf( unsigned char* const pucText, unsigned int uiLength, unsigned char ucUnit )

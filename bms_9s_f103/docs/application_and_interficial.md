@@ -4,7 +4,7 @@
 
 #### 功能0 初始化bq
 
-目标：控制iic发送初始化bq；设置SYS_CTRL寄存器位；以及检查当前通讯状态是否正常；引脚唤醒bq；以及后续的bq
+目标：控制iic发送初始化bq；设置SYS_CTRL寄存器位；以及检查当前通讯状态是否正常；引脚唤醒bq；以及后续的bq状态获取；设置保护触发的阈值；设置cc_config寄存器 0x19
 
 需求：iic
 
@@ -18,12 +18,15 @@ typedef struct{
     bool temp_sel,
     bool delay_dis,
     bool cc_en,
-    bool cc_oneshot
+    bool cc_oneshot，
+    uint8_t ov_shold,
+    ...tbc
 } bq_init_t;
 bq_init_t bq_init{
     .adc_en =...tbc
 };
 //当前bq状态机，设备状态机还未设置
+//使用枚举需要确保状态机是互斥的，那么没有实际意义
 typedef enum{
     bms_new 0x00,
     bms_inited 0x01,	//成功创建并且iic通信没有异常
@@ -36,11 +39,33 @@ typedef enum{
     bms_dsg 0x80
 }bms_sta_t;
 bms_sta_t g_bms_sta;
-void app_bq_init(void);	//创建状态机
-void app_bq_wake(void); //引脚唤醒
-bool app_bq_i2c_test(void);
 
+uint8_t sa_bms_sta;
+#define BMS_STA_ERRI2C_POS `1
+#define BMS_STA_ERRCAN_POS	2
+#define BMS_STA_LOAD		3
+#define BMS_STA_CHG			4
+#define BMS_STA_DSG			5
 
+uint8_t g_fault;
+#define BMS_BQ_OV			1
+#define BMS_BQ_UV			2
+#define BMS_BQ_SCD			3
+#define BMS_BQ_OCD			4
+#define BMS_BQ_INR			5
+
+typedef enum{
+    FAILTH=0,
+    SUCCEES
+}result_t;
+
+//一下是subapp流程，不是数据类型和API定义该有的部分
+void bsp_bq_init(&bq_init_t);	//创建状态机，传递指针是减小消耗
+void bsp_bq_wake(void); //引脚唤醒
+result_t bsp_bq_testi2c(void);	//检查iic通信并且对返回值操作
+void bsp_bq_getstatus(void);	//首次通过iic获取当前设备状态并存储进事件组
+void subapp_setfault(const uint8_t *raw,uint8_t * g_fault);		//raw[]和g_fault是全局变量，不需要get
+//根据返回值设置状态机
 ```
 
 #### 功能1 硬件定时器触发采样
@@ -53,10 +78,19 @@ bool app_bq_i2c_test(void);
 
 ```c
 //直接从bq读取的寄存器状态
-uint8_t ex_raw[24];//8bit SYS_STA 8bit*2*9 VCHI VCLO 8*2 BATHI BATLO整体电压 8*2 CCHI CCLO 8 SYS_CTRL1
-void bsp_sample(uint8_t *);
-uint8_t ex_flag_sampled;
-void app_sample(uint8_t*raw,uint8_t flag);
+//uint8_t sa_raw[24];//8bit SYS_STA 8bit*2*9 VCHI VCLO 8*2 BATHI BATLO整体电压 8*2 CCHI CCLO 8 SYS_CTRL1 
+//uint8_t g_sampled=0;
+typedef struct{
+    uint8_t sys_sta_r;
+    uint16_t vc_r[9];
+    uint16_t bat_r;
+    uint16_t cc_r;
+    uint16_t ts_r;
+    uint8_t sys_trcl1_r;
+    bool sampled;
+}raw_t;
+raw_t raw;
+void app_sample(void);		//post:g_sampled=1;	progress:raw[]和g_fault判断
 ```
 
 #### 功能2 软件保护
@@ -88,6 +122,12 @@ static fault_cnt_t prvb_fault_cnt=0;//限制在app_protect文件中
 //先if判断是否处于故障
 void bsp_protect_resume(const uint8_t* poc);//根据计算值是否在阈值内判断是否已经恢复，如果已经恢复写对应位1
 void app_protect(const uint8_t flag_sampled,fault_sta_t*,uint8_t raw[0]);
+
+///////////////////////////////////////////以上作为subapp实现流程，以及数据类型和API定义的反例//////////
+uint16_t g_proc[12];		//存放手计算之后处理的数据
+//计算之后的数据是16*9单节电压 16*1总电压 16*1电流 16*1温度 
+uint8_t s_resume_cnt=0;
+void app_protect(void);	//pre:g_fault!=0;	post:g_fault=0;	bsp_iic_write()写入1清理标志
 ```
 
 #### 功能3 计算
@@ -99,10 +139,26 @@ void app_protect(const uint8_t flag_sampled,fault_sta_t*,uint8_t raw[0]);
 数据类型：
 
 ```c
-uint8_t 
+uint16_t s_gain_map[32];
+uint16_t s_gain;
+uint8_t s_offset;
+//uint16_t s_temp;		//ADC原始值通过温度电阻关系得到实际温度
+//uint16_t s_cc_raw;		//即cc寄存器的原始值
+//uint16_t s_cc;			//cc*LSB/Rsense，是存储在proc[]里面的
+
+//uint16_t g_proc[12];
+//bool s_computed=0;
+typedef struct{
+    uint16_t vc[9];
+    uint16_t bat;
+    uint16_t cc;
+    uint16_t ts;
+    bool computed;
+}
+
+void app_getGainAndOffset(void);	//
+void app_compute(void);	//pre:g_samppled==1;	post:s_computed=1;	g_proc[];
 ```
-
-
 
 #### 功能4 均衡
 
@@ -110,11 +166,25 @@ uint8_t
 
 需求：iic
 
+数据类型：
+
+```c
+uint16_t s_vc_even;
+bsp_iic_write_cellbal();
+```
+
 #### 功能5 SOC计算
 
 目标：从proc[]中读取，根据已知表格查表实现，二分法查找确定，写回proc[]
 
 需求：iic
+
+数据类型：
+
+```c
+```
+
+
 
 #### 功能6 通讯RX
 
